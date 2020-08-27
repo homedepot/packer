@@ -30,6 +30,7 @@ type Config struct {
 	vmwcommon.ToolsConfig          `mapstructure:",squash"`
 	vmwcommon.VMXConfig            `mapstructure:",squash"`
 	vmwcommon.ExportConfig         `mapstructure:",squash"`
+	vmwcommon.DiskConfig           `mapstructure:",squash"`
 	// By default Packer creates a 'full' clone of the virtual machine
 	// specified in source_path. The resultant virtual machine is fully
 	// independant from the parent it was cloned from.
@@ -89,6 +90,7 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 	errs = packer.MultiErrorAppend(errs, c.FloppyConfig.Prepare(&c.ctx)...)
 	errs = packer.MultiErrorAppend(errs, c.VNCConfig.Prepare(&c.ctx)...)
 	errs = packer.MultiErrorAppend(errs, c.ExportConfig.Prepare(&c.ctx)...)
+	errs = packer.MultiErrorAppend(errs, c.DiskConfig.Prepare(&c.ctx)...)
 
 	if c.RemoteType == "" {
 		if c.SourcePath == "" {
@@ -112,23 +114,41 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 		}
 	}
 
+	if c.DiskTypeId == "" {
+		// Default is growable virtual disk split in 2GB files.
+		c.DiskTypeId = "1"
+
+		if c.RemoteType == "esx5" {
+			c.DiskTypeId = "zeroedthick"
+		}
+	}
+
+	if c.Format == "" {
+		if c.RemoteType != "esx5" {
+			c.Format = "vmx"
+		} else {
+			c.Format = "ovf"
+		}
+	}
+
+	if c.RemoteType != "esx5" && c.Format == "vmx" {
+		// if we're building locally and want a vmx, there's nothing to export.
+		// Set skip export flag here to keep the export step from attempting
+		// an unneded export
+		c.SkipExport = true
+	}
+
 	err = c.DriverConfig.Validate(c.SkipExport)
 	if err != nil {
 		errs = packer.MultiErrorAppend(errs, err)
 	}
 
-	if c.Format != "" {
+	if c.Format == "" {
 		if c.RemoteType != "esx5" {
-			errs = packer.MultiErrorAppend(errs,
-				fmt.Errorf("format is only valid when remote_type=esx5"))
+			c.Format = "vmx"
+		} else {
+			c.Format = "ovf"
 		}
-	} else {
-		c.Format = "ovf"
-	}
-
-	if !(c.Format == "ova" || c.Format == "ovf" || c.Format == "vmx") {
-		errs = packer.MultiErrorAppend(errs,
-			fmt.Errorf("format must be one of ova, ovf, or vmx"))
 	}
 
 	// Warnings
