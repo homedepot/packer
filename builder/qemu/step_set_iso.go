@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"net/http"
 
-	commonhelper "github.com/hashicorp/packer/helper/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/net"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // This step set iso_patch to available url
@@ -17,7 +17,7 @@ type stepSetISO struct {
 }
 
 func (s *stepSetISO) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	iso_path := ""
 
@@ -29,7 +29,7 @@ func (s *stepSetISO) Run(ctx context.Context, state multistep.StateBag) multiste
 
 		req.Header.Set("User-Agent", "Packer")
 
-		httpClient := commonhelper.HttpClientWithEnvironmentProxy()
+		httpClient := net.HttpClientWithEnvironmentProxy()
 
 		res, err := httpClient.Do(req)
 		if err == nil && (res.StatusCode >= 200 && res.StatusCode < 300) {

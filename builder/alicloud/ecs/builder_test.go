@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	helperconfig "github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	helperconfig "github.com/hashicorp/packer-plugin-sdk/template/config"
 )
 
 func testBuilderConfig() map[string]interface{} {
@@ -24,7 +24,7 @@ func testBuilderConfig() map[string]interface{} {
 func TestBuilder_ImplementsBuilder(t *testing.T) {
 	var raw interface{}
 	raw = &Builder{}
-	if _, ok := raw.(packer.Builder); !ok {
+	if _, ok := raw.(packersdk.Builder); !ok {
 		t.Fatalf("Builder should be a builder")
 	}
 }

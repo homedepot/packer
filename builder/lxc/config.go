@@ -8,10 +8,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	"github.com/mitchellh/mapstructure"
 )
 
@@ -80,7 +80,7 @@ func (c *Config) Prepare(raws ...interface{}) error {
 	}
 
 	// Accumulate any errors
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 
 	if c.OutputDir == "" {
 		c.OutputDir = fmt.Sprintf("output-%s", c.PackerBuildName)
@@ -103,7 +103,7 @@ func (c *Config) Prepare(raws ...interface{}) error {
 	}
 
 	if _, err := os.Stat(c.ConfigFile); os.IsNotExist(err) {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("LXC Config file appears to be missing: %s", c.ConfigFile))
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("LXC Config file appears to be missing: %s", c.ConfigFile))
 	}
 
 	if errs != nil && len(errs.Errors) > 0 {

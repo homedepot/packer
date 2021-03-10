@@ -4,15 +4,16 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
-	"github.com/hashicorp/packer/helper/useragent"
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/useragent"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
 
+	"github.com/hashicorp/packer/builder/yandex/version"
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/compute/v1"
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/endpoint"
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/vpc/v1"
@@ -30,30 +31,34 @@ const (
 
 type driverYC struct {
 	sdk *ycsdk.SDK
-	ui  packer.Ui
+	ui  packersdk.Ui
 }
 
-func NewDriverYC(ui packer.Ui, config *Config) (Driver, error) {
+func NewDriverYC(ui packersdk.Ui, ac *AccessConfig) (Driver, error) {
 	log.Printf("[INFO] Initialize Yandex.Cloud client...")
 
 	sdkConfig := ycsdk.Config{}
 
-	if config.Endpoint != "" {
-		sdkConfig.Endpoint = config.Endpoint
+	if ac.Endpoint != "" {
+		sdkConfig.Endpoint = ac.Endpoint
 	}
 
 	switch {
-	case config.Token == "" && config.ServiceAccountKeyFile == "":
+	case ac.Token == "" && ac.ServiceAccountKeyFile == "":
 		log.Printf("[INFO] Use Instance Service Account for authentication")
 		sdkConfig.Credentials = ycsdk.InstanceServiceAccount()
 
-	case config.Token != "":
-		log.Printf("[INFO] Use OAuth token for authentication")
-		sdkConfig.Credentials = ycsdk.OAuthToken(config.Token)
-
-	case config.ServiceAccountKeyFile != "":
-		log.Printf("[INFO] Use Service Account key file %q for authentication", config.ServiceAccountKeyFile)
-		key, err := iamkey.ReadFromJSONFile(config.ServiceAccountKeyFile)
+	case ac.Token != "":
+		if strings.HasPrefix(ac.Token, "t1.") && strings.Count(ac.Token, ".") == 2 {
+			log.Printf("[INFO] Use IAM token for authentication")
+			sdkConfig.Credentials = ycsdk.NewIAMTokenCredentials(ac.Token)
+		} else {
+			log.Printf("[INFO] Use OAuth token for authentication")
+			sdkConfig.Credentials = ycsdk.OAuthToken(ac.Token)
+		}
+	case ac.ServiceAccountKeyFile != "":
+		log.Printf("[INFO] Use Service Account key file %q for authentication", ac.ServiceAccountKeyFile)
+		key, err := iamkey.ReadFromJSONFile(ac.ServiceAccountKeyFile)
 		if err != nil {
 			return nil, err
 		}
@@ -69,7 +74,7 @@ func NewDriverYC(ui packer.Ui, config *Config) (Driver, error) {
 	requestIDInterceptor := requestid.Interceptor()
 
 	retryInterceptor := retry.Interceptor(
-		retry.WithMax(config.MaxRetries),
+		retry.WithMax(ac.MaxRetries),
 		retry.WithCodes(codes.Unavailable),
 		retry.WithAttemptHeader(true),
 		retry.WithBackoff(retry.BackoffExponentialWithJitter(defaultExponentialBackoffBase, defaultExponentialBackoffCap)))
@@ -78,11 +83,10 @@ func NewDriverYC(ui packer.Ui, config *Config) (Driver, error) {
 	// Now we will have new request id for every retry attempt.
 	interceptorChain := grpc_middleware.ChainUnaryClient(retryInterceptor, requestIDInterceptor)
 
-	userAgentMD := metadata.Pairs("user-agent", useragent.String())
-
 	sdk, err := ycsdk.Build(context.Background(), sdkConfig,
-		grpc.WithDefaultCallOptions(grpc.Header(&userAgentMD)),
-		grpc.WithUnaryInterceptor(interceptorChain))
+		grpc.WithUserAgent(useragent.String(version.YandexPluginVersion.FormattedVersion())),
+		grpc.WithUnaryInterceptor(interceptorChain),
+	)
 
 	if err != nil {
 		return nil, err

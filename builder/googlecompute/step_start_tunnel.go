@@ -18,12 +18,12 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/hashicorp/packer/common/net"
-	"github.com/hashicorp/packer/common/retry"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/packer/tmp"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/net"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
+	"github.com/hashicorp/packer-plugin-sdk/tmp"
 )
 
 // StepStartTunnel represents a Packer build step that launches an IAP tunnel
@@ -131,10 +131,11 @@ func (e RetryableTunnelError) Error() string {
 }
 
 type StepStartTunnel struct {
-	IAPConf     *IAPConfig
-	CommConf    *communicator.Config
-	AccountFile string
-	ProjectId   string
+	IAPConf            *IAPConfig
+	CommConf           *communicator.Config
+	AccountFile        string
+	ImpersonateAccount string
+	ProjectId          string
 
 	tunnelDriver TunnelDriver
 }
@@ -256,7 +257,7 @@ func (s *StepStartTunnel) Run(ctx context.Context, state multistep.StateBag) mul
 	}
 
 	// shell out to create the tunnel.
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	instanceName := state.Get("instance_name").(string)
 	c := state.Get("config").(*Config)
 
@@ -274,6 +275,10 @@ func (s *StepStartTunnel) Run(ctx context.Context, state multistep.StateBag) mul
 		strconv.Itoa(s.CommConf.Port()),
 		fmt.Sprintf("--local-host-port=localhost:%d", s.IAPConf.IAPLocalhostPort),
 		"--zone", c.Zone, "--project", s.ProjectId,
+	}
+
+	if s.ImpersonateAccount != "" {
+		args = append(args, fmt.Sprintf("--impersonate-service-account='%s'", s.ImpersonateAccount))
 	}
 
 	// This is the port the IAP tunnel listens on, on localhost.

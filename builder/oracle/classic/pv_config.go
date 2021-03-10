@@ -3,9 +3,9 @@ package classic
 import (
 	"fmt"
 
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 const imageListDefault = "/oracle/public/OL_7.2_UEKR4_x86_64"
@@ -82,19 +82,19 @@ func (c *PVConfig) IsPV() bool {
 	return c.PersistentVolumeSize > 0
 }
 
-func (c *PVConfig) Prepare(ctx *interpolate.Context) (errs *packer.MultiError) {
+func (c *PVConfig) Prepare(ctx *interpolate.Context) (errs *packersdk.MultiError) {
 	if !c.IsPV() {
 		if c.BuilderShape != "" {
-			errs = packer.MultiErrorAppend(errs,
+			errs = packersdk.MultiErrorAppend(errs,
 				fmt.Errorf("`builder_shape` has no meaning when `persistent_volume_size` is not set."))
 		}
 		if c.BuilderImageList != "" {
-			errs = packer.MultiErrorAppend(errs,
+			errs = packersdk.MultiErrorAppend(errs,
 				fmt.Errorf("`builder_image_list` has no meaning when `persistent_volume_size` is not set."))
 		}
 
 		if c.BuilderImageListEntry != nil {
-			errs = packer.MultiErrorAppend(errs,
+			errs = packersdk.MultiErrorAppend(errs,
 				fmt.Errorf("`builder_image_list_entry` has no meaning when `persistent_volume_size` is not set."))
 		}
 		return errs
@@ -102,7 +102,7 @@ func (c *PVConfig) Prepare(ctx *interpolate.Context) (errs *packer.MultiError) {
 
 	c.BuilderComm.SSHPty = true
 	if c.BuilderComm.Type == "winrm" {
-		errs = packer.MultiErrorAppend(errs,
+		errs = packersdk.MultiErrorAppend(errs,
 			fmt.Errorf("`ssh` is the only valid builder communicator type."))
 	}
 
@@ -133,7 +133,7 @@ func (c *PVConfig) Prepare(ctx *interpolate.Context) (errs *packer.MultiError) {
 	}
 
 	if es := c.BuilderComm.Prepare(ctx); len(es) > 0 {
-		errs = packer.MultiErrorAppend(errs, es...)
+		errs = packersdk.MultiErrorAppend(errs, es...)
 	}
 
 	return

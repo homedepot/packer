@@ -9,11 +9,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/packer/tmp"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/tmp"
 )
 
 var additionsVersionMap = map[string]string{
@@ -40,7 +40,7 @@ type StepDownloadGuestAdditions struct {
 func (s *StepDownloadGuestAdditions) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	var action multistep.StepAction
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	// If we've disabled guest additions, don't download
 	if s.GuestAdditionsMode == GuestAdditionsModeDisable {
@@ -121,7 +121,7 @@ func (s *StepDownloadGuestAdditions) Run(ctx context.Context, state multistep.St
 	log.Printf("Guest additions URL: %s", url)
 
 	// We're good, so let's go ahead and download this thing..
-	downStep := &common.StepDownload{
+	downStep := &commonsteps.StepDownload{
 		Checksum:    checksum,
 		Description: "Guest additions",
 		ResultKey:   "guest_additions_path",
@@ -151,7 +151,7 @@ func (s *StepDownloadGuestAdditions) downloadAdditionsSHA256(ctx context.Context
 	defer os.Remove(checksumsFile.Name())
 	checksumsFile.Close()
 
-	downStep := &common.StepDownload{
+	downStep := &commonsteps.StepDownload{
 		Description: "Guest additions checksums",
 		ResultKey:   "guest_additions_checksums_path",
 		Url:         []string{checksumsUrl},

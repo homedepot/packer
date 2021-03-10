@@ -7,9 +7,9 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/azure/common/constants"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 type StepDeployTemplate struct {
@@ -25,7 +25,7 @@ type StepDeployTemplate struct {
 	name       string
 }
 
-func NewStepDeployTemplate(client *AzureClient, ui packer.Ui, config *Config, deploymentName string, factory templateFactoryFuncDtl) *StepDeployTemplate {
+func NewStepDeployTemplate(client *AzureClient, ui packersdk.Ui, config *Config, deploymentName string, factory templateFactoryFuncDtl) *StepDeployTemplate {
 	var step = &StepDeployTemplate{
 		client:  client,
 		say:     func(message string) { ui.Say(message) },

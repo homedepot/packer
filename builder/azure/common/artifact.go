@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/Azure/go-autorest/autorest/azure"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/azure/common/client"
-	"github.com/hashicorp/packer/packer"
 )
 
 // Artifact is an artifact implementation that contains built Managed Images or Disks.
@@ -96,7 +96,7 @@ func (a *Artifact) Destroy() error {
 		if len(errs) == 1 {
 			return errs[0]
 		} else {
-			return &packer.MultiError{Errors: errs}
+			return &packersdk.MultiError{Errors: errs}
 		}
 	}
 

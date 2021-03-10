@@ -8,13 +8,16 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/hashicorp/packer/common/retry"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer/builder/amazon/common/awserrors"
 )
 
 type StepCreateTags struct {
+	AMISkipCreateImage bool
+
 	Tags         map[string]string
 	SnapshotTags map[string]string
 	Ctx          interpolate.Context
@@ -23,7 +26,13 @@ type StepCreateTags struct {
 func (s *StepCreateTags) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	ec2conn := state.Get("ec2").(*ec2.EC2)
 	session := state.Get("awsSession").(*session.Session)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
+
+	if s.AMISkipCreateImage {
+		ui.Say("Skipping AMI create tags...")
+		return multistep.ActionContinue
+	}
+
 	amis := state.Get("amis").(map[string]string)
 
 	if len(s.Tags) == 0 && len(s.SnapshotTags) == 0 {
@@ -91,7 +100,7 @@ func (s *StepCreateTags) Run(ctx context.Context, state multistep.StateBag) mult
 
 		// Retry creating tags for about 2.5 minutes
 		err = retry.Config{Tries: 11, ShouldRetry: func(error) bool {
-			if IsAWSErr(err, "InvalidAMIID.NotFound", "") || IsAWSErr(err, "InvalidSnapshot.NotFound", "") {
+			if awserrors.Matches(err, "InvalidAMIID.NotFound", "") || awserrors.Matches(err, "InvalidSnapshot.NotFound", "") {
 				return true
 			}
 			return false

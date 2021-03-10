@@ -22,6 +22,7 @@ variable "availability_zone_names" {
 
 locals {
   feefoo = "${var.foo}_${var.image_id}"
+  data_source = data.amazon-ami.test.string
 }
 
 
@@ -36,4 +37,9 @@ locals {
     {id = "b"},
     {id = "c"},
   ]
+}
+
+local "supersecret" {
+  expression = "${var.image_id}-password"
+  sensitive = true
 }

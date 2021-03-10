@@ -5,7 +5,10 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/hashicorp/packer/helper/common"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/packerbuilderdata"
+	"github.com/hashicorp/packer/version"
 )
 
 func boolPointer(tf bool) *bool {
@@ -15,16 +18,16 @@ func boolPointer(tf bool) *bool {
 func testBuild() *CoreBuild {
 	return &CoreBuild{
 		Type:          "test",
-		Builder:       &MockBuilder{ArtifactId: "b"},
+		Builder:       &packersdk.MockBuilder{ArtifactId: "b"},
 		BuilderConfig: 42,
 		BuilderType:   "foo",
-		hooks: map[string][]Hook{
-			"foo": {&MockHook{}},
+		hooks: map[string][]packersdk.Hook{
+			"foo": {&packersdk.MockHook{}},
 		},
 		Provisioners: []CoreBuildProvisioner{
 			{
 				PType:       "mock-provisioner",
-				Provisioner: &MockProvisioner{},
+				Provisioner: &packersdk.MockProvisioner{},
 				config:      []interface{}{42}},
 		},
 		PostProcessors: [][]CoreBuildPostProcessor{
@@ -39,13 +42,14 @@ func testBuild() *CoreBuild {
 
 func testDefaultPackerConfig() map[string]interface{} {
 	return map[string]interface{}{
-		BuildNameConfigKey:     "test",
-		BuilderTypeConfigKey:   "foo",
-		DebugConfigKey:         false,
-		ForceConfigKey:         false,
-		OnErrorConfigKey:       "cleanup",
-		TemplatePathKey:        "",
-		UserVariablesConfigKey: make(map[string]string),
+		common.BuildNameConfigKey:     "test",
+		common.BuilderTypeConfigKey:   "foo",
+		common.CoreVersionConfigKey:   version.FormattedVersion(),
+		common.DebugConfigKey:         false,
+		common.ForceConfigKey:         false,
+		common.OnErrorConfigKey:       "cleanup",
+		common.TemplatePathKey:        "",
+		common.UserVariablesConfigKey: make(map[string]string),
 	}
 }
 func TestBuild_Name(t *testing.T) {
@@ -59,7 +63,7 @@ func TestBuild_Prepare(t *testing.T) {
 	packerConfig := testDefaultPackerConfig()
 
 	build := testBuild()
-	builder := build.Builder.(*MockBuilder)
+	builder := build.Builder.(*packersdk.MockBuilder)
 
 	build.Prepare()
 	if !builder.PrepareCalled {
@@ -70,7 +74,7 @@ func TestBuild_Prepare(t *testing.T) {
 	}
 
 	coreProv := build.Provisioners[0]
-	prov := coreProv.Provisioner.(*MockProvisioner)
+	prov := coreProv.Provisioner.(*packersdk.MockProvisioner)
 	if !prov.PrepCalled {
 		t.Fatal("prep should be called")
 	}
@@ -90,7 +94,7 @@ func TestBuild_Prepare(t *testing.T) {
 
 func TestBuild_Prepare_SkipWhenBuilderAlreadyInitialized(t *testing.T) {
 	build := testBuild()
-	builder := build.Builder.(*MockBuilder)
+	builder := build.Builder.(*packersdk.MockBuilder)
 
 	build.Prepared = true
 	build.Prepare()
@@ -127,7 +131,7 @@ func TestBuildPrepare_BuilderWarnings(t *testing.T) {
 	expected := []string{"foo"}
 
 	build := testBuild()
-	builder := build.Builder.(*MockBuilder)
+	builder := build.Builder.(*packersdk.MockBuilder)
 	builder.PrepareWarnings = expected
 
 	warn, err := build.Prepare()
@@ -141,10 +145,10 @@ func TestBuildPrepare_BuilderWarnings(t *testing.T) {
 
 func TestBuild_Prepare_Debug(t *testing.T) {
 	packerConfig := testDefaultPackerConfig()
-	packerConfig[DebugConfigKey] = true
+	packerConfig[common.DebugConfigKey] = true
 
 	build := testBuild()
-	builder := build.Builder.(*MockBuilder)
+	builder := build.Builder.(*packersdk.MockBuilder)
 
 	build.SetDebug(true)
 	build.Prepare()
@@ -156,7 +160,7 @@ func TestBuild_Prepare_Debug(t *testing.T) {
 	}
 
 	coreProv := build.Provisioners[0]
-	prov := coreProv.Provisioner.(*MockProvisioner)
+	prov := coreProv.Provisioner.(*packersdk.MockProvisioner)
 	if !prov.PrepCalled {
 		t.Fatal("prepare should be called")
 	}
@@ -167,13 +171,13 @@ func TestBuild_Prepare_Debug(t *testing.T) {
 
 func TestBuildPrepare_variables_default(t *testing.T) {
 	packerConfig := testDefaultPackerConfig()
-	packerConfig[UserVariablesConfigKey] = map[string]string{
+	packerConfig[common.UserVariablesConfigKey] = map[string]string{
 		"foo": "bar",
 	}
 
 	build := testBuild()
 	build.Variables["foo"] = "bar"
-	builder := build.Builder.(*MockBuilder)
+	builder := build.Builder.(*packersdk.MockBuilder)
 
 	warn, err := build.Prepare()
 	if len(warn) > 0 {
@@ -196,7 +200,7 @@ func TestBuildPrepare_ProvisionerGetsGeneratedMap(t *testing.T) {
 	packerConfig := testDefaultPackerConfig()
 
 	build := testBuild()
-	builder := build.Builder.(*MockBuilder)
+	builder := build.Builder.(*packersdk.MockBuilder)
 	builder.GeneratedVars = []string{"PartyVar"}
 
 	build.Prepare()
@@ -208,13 +212,13 @@ func TestBuildPrepare_ProvisionerGetsGeneratedMap(t *testing.T) {
 	}
 
 	coreProv := build.Provisioners[0]
-	prov := coreProv.Provisioner.(*MockProvisioner)
+	prov := coreProv.Provisioner.(*packersdk.MockProvisioner)
 	if !prov.PrepCalled {
 		t.Fatal("prepare should be called")
 	}
 
 	generated := BasicPlaceholderData()
-	generated["PartyVar"] = "Build_PartyVar. " + common.PlaceholderMsg
+	generated["PartyVar"] = "Build_PartyVar. " + packerbuilderdata.PlaceholderMsg
 	if !reflect.DeepEqual(prov.PrepConfigs, []interface{}{42, packerConfig, generated}) {
 		t.Fatalf("bad: %#v", prov.PrepConfigs)
 	}
@@ -235,7 +239,7 @@ func TestBuild_Run(t *testing.T) {
 	}
 
 	// Verify builder was run
-	builder := build.Builder.(*MockBuilder)
+	builder := build.Builder.(*packersdk.MockBuilder)
 	if !builder.RunCalled {
 		t.Fatal("should be called")
 	}
@@ -244,7 +248,7 @@ func TestBuild_Run(t *testing.T) {
 	dispatchHook := builder.RunHook
 	dispatchHook.Run(ctx, "foo", nil, nil, 42)
 
-	hook := build.hooks["foo"][0].(*MockHook)
+	hook := build.hooks["foo"][0].(*packersdk.MockHook)
 	if !hook.RunCalled {
 		t.Fatal("should be called")
 	}
@@ -253,8 +257,11 @@ func TestBuild_Run(t *testing.T) {
 	}
 
 	// Verify provisioners run
-	dispatchHook.Run(ctx, HookProvision, nil, new(MockCommunicator), 42)
-	prov := build.Provisioners[0].Provisioner.(*MockProvisioner)
+	err = dispatchHook.Run(ctx, packersdk.HookProvision, nil, new(packersdk.MockCommunicator), 42)
+	if err != nil {
+		t.Fatalf("should not have errored")
+	}
+	prov := build.Provisioners[0].Provisioner.(*packersdk.MockProvisioner)
 	if !prov.ProvCalled {
 		t.Fatal("should be called")
 	}
@@ -478,7 +485,7 @@ func TestBuild_Cancel(t *testing.T) {
 
 	topCtx, topCtxCancel := context.WithCancel(context.Background())
 
-	builder := build.Builder.(*MockBuilder)
+	builder := build.Builder.(*packersdk.MockBuilder)
 
 	builder.RunFn = func(ctx context.Context) {
 		topCtxCancel()

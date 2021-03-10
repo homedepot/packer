@@ -10,12 +10,12 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/common/uuid"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/uuid"
 	"github.com/mitchellh/mapstructure"
 )
 
@@ -85,6 +85,14 @@ type Config struct {
 	UserDataFile string `mapstructure:"user_data_file" required:"false"`
 	// Tags to apply to the droplet when it is created
 	Tags []string `mapstructure:"tags" required:"false"`
+	// UUID of the VPC which the droplet will be created in. Before using this,
+	// private_networking should be enabled.
+	VPCUUID string `mapstructure:"vpc_uuid" required:"false"`
+	// Wheter the communicators should use private IP or not (public IP in that case).
+	// If the droplet is or going to be accessible only from the local network because
+	// it is at behind a firewall, then communicators should use the private IP
+	// instead of the public IP. Before using this, private_networking should be enabled.
+	ConnectWithPrivateIP bool `mapstructure:"connect_with_private_ip" required:"false"`
 
 	ctx interpolate.Context
 }
@@ -140,38 +148,38 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 		c.SnapshotTimeout = 60 * time.Minute
 	}
 
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 
 	if es := c.Comm.Prepare(&c.ctx); len(es) > 0 {
-		errs = packer.MultiErrorAppend(errs, es...)
+		errs = packersdk.MultiErrorAppend(errs, es...)
 	}
 	if c.APIToken == "" {
 		// Required configurations that will display errors if not set
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("api_token for auth must be specified"))
 	}
 
 	if c.Region == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("region is required"))
 	}
 
 	if c.Size == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("size is required"))
 	}
 
 	if c.Image == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("image is required"))
 	}
 
 	if c.UserData != "" && c.UserDataFile != "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("only one of user_data or user_data_file can be specified"))
 	} else if c.UserDataFile != "" {
 		if _, err := os.Stat(c.UserDataFile); err != nil {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New(fmt.Sprintf("user_data_file not found: %s", c.UserDataFile)))
 		}
 	}
@@ -183,7 +191,21 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 
 	for _, t := range c.Tags {
 		if !tagRe.MatchString(t) {
-			errs = packer.MultiErrorAppend(errs, errors.New(fmt.Sprintf("invalid tag: %s", t)))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("invalid tag: %s", t))
+		}
+	}
+
+	// Check if the PrivateNetworking is enabled by user before use VPC UUID
+	if c.VPCUUID != "" {
+		if c.PrivateNetworking != true {
+			errs = packersdk.MultiErrorAppend(errs, errors.New("private networking should be enabled to use vpc_uuid"))
+		}
+	}
+
+	// Check if the PrivateNetworking is enabled by user before use ConnectWithPrivateIP
+	if c.ConnectWithPrivateIP == true {
+		if c.PrivateNetworking != true {
+			errs = packersdk.MultiErrorAppend(errs, errors.New("private networking should be enabled to use connect_with_private_ip"))
 		}
 	}
 
@@ -191,6 +213,6 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 		return nil, errs
 	}
 
-	packer.LogSecretFilter.Set(c.APIToken)
+	packersdk.LogSecretFilter.Set(c.APIToken)
 	return nil, nil
 }

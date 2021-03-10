@@ -9,19 +9,20 @@ import (
 	"os"
 	"time"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/common/uuid"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/uuid"
 )
 
 // Config holds all the details needed to configure the builder.
 type Config struct {
-	common.PackerConfig `mapstructure:",squash"`
-	common.HTTPConfig   `mapstructure:",squash"`
-	Comm                communicator.Config `mapstructure:",squash"`
+	common.PackerConfig    `mapstructure:",squash"`
+	commonsteps.HTTPConfig `mapstructure:",squash"`
+	Comm                   communicator.Config `mapstructure:",squash"`
 
 	// The CloudStack API endpoint we will connect to. It can
 	// also be specified via environment variable CLOUDSTACK_API_URL, if set.
@@ -120,14 +121,14 @@ type Config struct {
 	// provisioners should connect to the local IP address of the instance.
 	UseLocalIPAddress bool `mapstructure:"use_local_ip_address" required:"false"`
 	// User data to launch with the instance. This is a
-	// template engine; see "User Data" bellow for
+	// template engine; see "User Data" below for
 	// more details. Packer will not automatically wait for a user script to
 	// finish before shutting down the instance this must be handled in a
 	// provisioner.
 	UserData string `mapstructure:"user_data" required:"false"`
 	// Path to a file that will be used for the user
 	// data when launching the instance. This file will be parsed as a template
-	// engine see User Data bellow for more
+	// engine see User Data below for more
 	// details.
 	UserDataFile string `mapstructure:"user_data_file" required:"false"`
 	// The name or ID of the zone where the instance will be
@@ -181,7 +182,7 @@ func (c *Config) Prepare(raws ...interface{}) error {
 		return err
 	}
 
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 
 	// Set some defaults.
 	if c.APIURL == "" {
@@ -218,7 +219,7 @@ func (c *Config) Prepare(raws ...interface{}) error {
 	if c.TemplateName == "" {
 		name, err := interpolate.Render("packer-{{timestamp}}", nil)
 		if err != nil {
-			errs = packer.MultiErrorAppend(errs,
+			errs = packersdk.MultiErrorAppend(errs,
 				fmt.Errorf("Unable to parse template name: %s ", err))
 		}
 
@@ -239,71 +240,71 @@ func (c *Config) Prepare(raws ...interface{}) error {
 
 	// Process required parameters.
 	if c.APIURL == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("a api_url must be specified"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("a api_url must be specified"))
 	}
 
 	if c.APIKey == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("a api_key must be specified"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("a api_key must be specified"))
 	}
 
 	if c.SecretKey == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("a secret_key must be specified"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("a secret_key must be specified"))
 	}
 
 	if c.Network == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("a network must be specified"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("a network must be specified"))
 	}
 
 	if c.CreateSecurityGroup && !c.Expunge {
-		errs = packer.MultiErrorAppend(errs, errors.New("auto creating a temporary security group requires expunge"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("auto creating a temporary security group requires expunge"))
 	}
 
 	if c.ServiceOffering == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("a service_offering must be specified"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("a service_offering must be specified"))
 	}
 
 	if c.SourceISO == "" && c.SourceTemplate == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("either source_iso or source_template must be specified"))
 	}
 
 	if c.SourceISO != "" && c.SourceTemplate != "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("only one of source_iso or source_template can be specified"))
 	}
 
 	if c.SourceISO != "" && c.DiskOffering == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("a disk_offering must be specified when using source_iso"))
 	}
 
 	if c.SourceISO != "" && c.Hypervisor == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("a hypervisor must be specified when using source_iso"))
 	}
 
 	if c.TemplateOS == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("a template_os must be specified"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("a template_os must be specified"))
 	}
 
 	if c.UserData != "" && c.UserDataFile != "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("only one of user_data or user_data_file can be specified"))
 	}
 
 	if c.UserDataFile != "" {
 		if _, err := os.Stat(c.UserDataFile); err != nil {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("user_data_file not found: %s", c.UserDataFile))
 		}
 	}
 
 	if c.Zone == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("a zone must be specified"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("a zone must be specified"))
 	}
 
 	if es := c.Comm.Prepare(&c.ctx); len(es) > 0 {
-		errs = packer.MultiErrorAppend(errs, es...)
+		errs = packersdk.MultiErrorAppend(errs, es...)
 	}
 
 	// Check for errors and return if we have any.

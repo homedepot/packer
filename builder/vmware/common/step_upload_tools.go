@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 type toolsUploadPathTemplate struct {
@@ -35,9 +35,9 @@ func (c *StepUploadTools) Run(ctx context.Context, state multistep.StateBag) mul
 		return multistep.ActionContinue
 	}
 
-	comm := state.Get("communicator").(packer.Communicator)
+	comm := state.Get("communicator").(packersdk.Communicator)
 	tools_source := state.Get("tools_upload_source").(string)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	ui.Say(fmt.Sprintf("Uploading the '%s' VMware Tools", c.ToolsUploadFlavor))
 	f, err := os.Open(tools_source)

@@ -60,11 +60,7 @@ func (c *ConsoleCommand) RunContext(ctx context.Context, cla *ConsoleArgs) int {
 		return ret
 	}
 
-	diags := packerStarter.Initialize()
-	ret = writeDiags(c.Ui, nil, diags)
-	if ret != 0 {
-		return ret
-	}
+	_ = packerStarter.Initialize(packer.InitializeOptions{})
 
 	// Determine if stdin is a pipe. If so, we evaluate directly.
 	if c.StdinPiped() {
@@ -85,7 +81,7 @@ Usage: packer console [options] [TEMPLATE]
 
 Options:
   -var 'key=value'       Variable for templates, can be used multiple times.
-  -var-file=path         JSON file containing user variables. [ Note that even in HCL mode this expects file to contain JSON, a fix is comming soon ]
+  -var-file=path         JSON or HCL2 file containing user variables.
 `
 
 	return strings.TrimSpace(helpText)

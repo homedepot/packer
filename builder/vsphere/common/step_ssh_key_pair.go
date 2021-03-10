@@ -6,12 +6,12 @@ import (
 	"io/ioutil"
 	"os"
 
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/communicator/ssh"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/uuid"
 	"github.com/hashicorp/packer/builder/vsphere/driver"
-	"github.com/hashicorp/packer/common/uuid"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/helper/ssh"
-	"github.com/hashicorp/packer/packer"
 )
 
 // StepSshKeyPair executes the business logic for setting the SSH key pair in
@@ -27,7 +27,7 @@ func (s *StepSshKeyPair) Run(ctx context.Context, state multistep.StateBag) mult
 		return multistep.ActionContinue
 	}
 
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	comment := fmt.Sprintf("packer_%s", uuid.TimeOrderedUUID())
 	if s.Comm.SSHPrivateKeyFile != "" {
@@ -81,7 +81,7 @@ func (s *StepSshKeyPair) Run(ctx context.Context, state multistep.StateBag) mult
 	s.Comm.SSHPublicKey = kp.PublicKeyAuthorizedKeysLine
 	s.Comm.SSHClearAuthorizedKeys = true
 
-	vm := state.Get("vm").(*driver.VirtualMachine)
+	vm := state.Get("vm").(*driver.VirtualMachineDriver)
 	err = vm.AddPublicKeys(ctx, string(s.Comm.SSHPublicKey))
 	if err != nil {
 		state.Put("error", fmt.Errorf("error saving temporary keypair in the vm: %s", err))
@@ -107,7 +107,7 @@ func (s *StepSshKeyPair) Run(ctx context.Context, state multistep.StateBag) mult
 func (s *StepSshKeyPair) Cleanup(state multistep.StateBag) {
 	if s.Debug {
 		if err := os.Remove(s.DebugKeyPath); err != nil {
-			ui := state.Get("ui").(packer.Ui)
+			ui := state.Get("ui").(packersdk.Ui)
 			ui.Error(fmt.Sprintf(
 				"Error removing debug key '%s': %s", s.DebugKeyPath, err))
 		}

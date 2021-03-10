@@ -2,10 +2,11 @@ package openstack
 
 import (
 	"os"
+	"regexp"
 	"testing"
 
 	"github.com/gophercloud/gophercloud/openstack/imageservice/v2/images"
-	"github.com/hashicorp/packer/helper/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
 	"github.com/mitchellh/mapstructure"
 )
 
@@ -130,6 +131,73 @@ func TestRunConfigPrepare_FloatingIPPoolCompat(t *testing.T) {
 	if c.FloatingIPNetwork != "uuid2" {
 		t.Fatalf("invalid value: %s", c.FloatingIPNetwork)
 	}
+}
+
+func TestRunConfigPrepare_ExternalSourceImageURL(t *testing.T) {
+	c := testRunConfig()
+	// test setting both ExternalSourceImageURL and SourceImage causes an error
+	c.ExternalSourceImageURL = "http://example.com/image.qcow2"
+	if err := c.Prepare(nil); len(err) != 1 {
+		t.Fatalf("err: %s", err)
+	}
+
+	c = testRunConfig()
+	// test setting both ExternalSourceImageURL and SourceImageName causes an error
+	c.SourceImage = ""
+	c.SourceImageName = "abcd"
+	c.ExternalSourceImageURL = "http://example.com/image.qcow2"
+	if err := c.Prepare(nil); len(err) != 1 {
+		t.Fatalf("err: %s", err)
+	}
+
+	c = testRunConfig()
+	// test neither setting SourceImage, SourceImageName or ExternalSourceImageURL causes an error
+	c.SourceImage = ""
+	c.SourceImageName = ""
+	c.ExternalSourceImageURL = ""
+	if err := c.Prepare(nil); len(err) != 1 {
+		t.Fatalf("err: %s", err)
+	}
+
+	c = testRunConfig()
+	// test setting only ExternalSourceImageURL passes
+	c.SourceImage = ""
+	c.SourceImageName = ""
+	c.ExternalSourceImageURL = "http://example.com/image.qcow2"
+	if err := c.Prepare(nil); len(err) != 0 {
+		t.Fatalf("err: %s", err)
+	}
+
+	// test default values
+	if c.ExternalSourceImageFormat != "qcow2" {
+		t.Fatalf("ExternalSourceImageFormat should have been set to default: qcow2")
+	}
+
+	p := `packer_[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}`
+	if matches, _ := regexp.MatchString(p, c.SourceImageName); !matches {
+		t.Fatalf("invalid format for SourceImageName: %s", c.SourceImageName)
+	}
+
+	c = testRunConfig()
+	// test setting a filter passes
+	c.SourceImage = ""
+	c.SourceImageName = ""
+	c.ExternalSourceImageURL = ""
+	c.SourceImageFilters = ImageFilter{
+		Filters: ImageFilterOptions{
+			Name:       "Ubuntu 16.04",
+			Visibility: "public",
+			Owner:      "1234567890",
+			Tags:       []string{"prod", "ready"},
+			Properties: map[string]string{"os_distro": "ubuntu", "os_version": "16.04"},
+		},
+		MostRecent: true,
+	}
+
+	if err := c.Prepare(nil); len(err) != 0 {
+		t.Fatalf("Should not error if everything but filter is empty: %s", err)
+	}
+
 }
 
 // This test case confirms that only allowed fields will be set to values

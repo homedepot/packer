@@ -12,7 +12,7 @@ import (
 	"time"
 
 	versionUtil "github.com/hashicorp/go-version"
-	"github.com/hashicorp/packer/common/retry"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
 )
 
 type VBox42Driver struct {
@@ -64,12 +64,22 @@ func (d *VBox42Driver) CreateNVMeController(vmName string, name string, portcoun
 }
 
 func (d *VBox42Driver) CreateSCSIController(vmName string, name string) error {
-
 	command := []string{
 		"storagectl", vmName,
 		"--name", name,
 		"--add", "scsi",
 		"--controller", "LSILogic",
+	}
+
+	return d.VBoxManage(command...)
+}
+
+func (d *VBox42Driver) CreateVirtIOController(vmName string, name string) error {
+	command := []string{
+		"storagectl", vmName,
+		"--name", name,
+		"--add", "VirtIO",
+		"--controller", "VirtIO",
 	}
 
 	return d.VBoxManage(command...)

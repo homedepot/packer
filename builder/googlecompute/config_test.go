@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hashicorp/packer/helper/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
 )
 
 func TestConfigPrepare(t *testing.T) {
@@ -80,6 +80,17 @@ func TestConfigPrepare(t *testing.T) {
 		},
 		{
 			"ssh_timeout",
+			"5s",
+			false,
+		},
+
+		{
+			"wait_to_add_ssh_keys",
+			"SO BAD",
+			true,
+		},
+		{
+			"wait_to_add_ssh_keys",
 			"5s",
 			false,
 		},

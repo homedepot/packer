@@ -6,8 +6,8 @@ package triton
 import (
 	"fmt"
 
-	"github.com/hashicorp/packer/hcl2template"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 // SourceMachineConfig represents the configuration to run a machine using
@@ -57,9 +57,9 @@ type SourceMachineConfig struct {
 	MachineTags map[string]string `mapstructure:"source_machine_tags" required:"false"`
 	// Same as [`source_machine_tags`](#source_machine_tags) but defined as a
 	// singular block containing a `key` and a `value` field. In HCL2 mode the
-	// [`dynamic_block`](/docs/configuration/from-1.5/expressions#dynamic-blocks)
+	// [`dynamic_block`](/docs/templates/hcl_templates/expressions#dynamic-blocks)
 	// will allow you to create those programatically.
-	MachineTag hcl2template.KeyValues `mapstructure:"source_machine_tag" required:"false"`
+	MachineTag config.KeyValues `mapstructure:"source_machine_tag" required:"false"`
 	// Whether or not the firewall
 	// of the VM used to create an image of is enabled. The Triton firewall only
 	// filters inbound traffic to the VM. All outbound traffic is always allowed.

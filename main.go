@@ -1,7 +1,6 @@
 // This is the main package for the `packer` application.
 
 //go:generate go run ./scripts/generate-plugins.go
-//go:generate go generate ./common/bootcommand/...
 package main
 
 import (
@@ -17,10 +16,12 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-uuid"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/pathing"
+	pluginsdk "github.com/hashicorp/packer-plugin-sdk/plugin"
+	"github.com/hashicorp/packer-plugin-sdk/tmp"
 	"github.com/hashicorp/packer/command"
 	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/packer/plugin"
-	"github.com/hashicorp/packer/packer/tmp"
 	"github.com/hashicorp/packer/version"
 	"github.com/mitchellh/cli"
 	"github.com/mitchellh/panicwrap"
@@ -43,85 +44,83 @@ func realMain() int {
 	wrapConfig.CookieKey = "PACKER_WRAP_COOKIE"
 	wrapConfig.CookieValue = "49C22B1A-3A93-4C98-97FA-E07D18C787B5"
 
-	if !panicwrap.Wrapped(&wrapConfig) {
-		// Generate a UUID for this packer run and pass it to the environment.
-		// GenerateUUID always returns a nil error (based on rand.Read) so we'll
-		// just ignore it.
-		UUID, _ := uuid.GenerateUUID()
-		os.Setenv("PACKER_RUN_UUID", UUID)
-
-		// Determine where logs should go in general (requested by the user)
-		logWriter, err := logOutput()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Couldn't setup log output: %s", err)
-			return 1
-		}
-		if logWriter == nil {
-			logWriter = ioutil.Discard
-		}
-
-		packer.LogSecretFilter.SetOutput(logWriter)
-
-		// Disable logging here
-		log.SetOutput(ioutil.Discard)
-
-		// We always send logs to a temporary file that we use in case
-		// there is a panic. Otherwise, we delete it.
-		logTempFile, err := tmp.File("packer-log")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Couldn't setup logging tempfile: %s", err)
-			return 1
-		}
-		defer os.Remove(logTempFile.Name())
-		defer logTempFile.Close()
-
-		// Tell the logger to log to this file
-		os.Setenv(EnvLog, "")
-		os.Setenv(EnvLogFile, "")
-
-		// Setup the prefixed readers that send data properly to
-		// stdout/stderr.
-		doneCh := make(chan struct{})
-		outR, outW := io.Pipe()
-		go copyOutput(outR, doneCh)
-
-		// Enable checkpoint for panic reporting
-		if config, _ := loadConfig(); config != nil && !config.DisableCheckpoint {
-			packer.CheckpointReporter = packer.NewCheckpointReporter(
-				config.DisableCheckpointSignature,
-			)
-		}
-
-		// Create the configuration for panicwrap and wrap our executable
-		wrapConfig.Handler = panicHandler(logTempFile)
-		wrapConfig.Writer = io.MultiWriter(logTempFile, &packer.LogSecretFilter)
-		wrapConfig.Stdout = outW
-		wrapConfig.DetectDuration = 500 * time.Millisecond
-		wrapConfig.ForwardSignals = []os.Signal{syscall.SIGTERM}
-		exitStatus, err := panicwrap.Wrap(&wrapConfig)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Couldn't start Packer: %s", err)
-			return 1
-		}
-
-		// If >= 0, we're the parent, so just exit
-		if exitStatus >= 0 {
-			// Close the stdout writer so that our copy process can finish
-			outW.Close()
-
-			// Wait for the output copying to finish
-			<-doneCh
-
-			return exitStatus
-		}
-
-		// We're the child, so just close the tempfile we made in order to
-		// save file handles since the tempfile is only used by the parent.
-		logTempFile.Close()
+	if inPlugin() || panicwrap.Wrapped(&wrapConfig) {
+		// Call the real main
+		return wrappedMain()
 	}
 
-	// Call the real main
-	return wrappedMain()
+	// Generate a UUID for this packer run and pass it to the environment.
+	// GenerateUUID always returns a nil error (based on rand.Read) so we'll
+	// just ignore it.
+	UUID, _ := uuid.GenerateUUID()
+	os.Setenv("PACKER_RUN_UUID", UUID)
+
+	// Determine where logs should go in general (requested by the user)
+	logWriter, err := logOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Couldn't setup log output: %s", err)
+		return 1
+	}
+	if logWriter == nil {
+		logWriter = ioutil.Discard
+	}
+
+	packersdk.LogSecretFilter.SetOutput(logWriter)
+
+	// Disable logging here
+	log.SetOutput(ioutil.Discard)
+
+	// We always send logs to a temporary file that we use in case
+	// there is a panic. Otherwise, we delete it.
+	logTempFile, err := tmp.File("packer-log")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Couldn't setup logging tempfile: %s", err)
+		return 1
+	}
+	defer os.Remove(logTempFile.Name())
+	defer logTempFile.Close()
+
+	// Setup the prefixed readers that send data properly to
+	// stdout/stderr.
+	doneCh := make(chan struct{})
+	outR, outW := io.Pipe()
+	go copyOutput(outR, doneCh)
+
+	// Enable checkpoint for panic reporting
+	if config, _ := loadConfig(); config != nil && !config.DisableCheckpoint {
+		packer.CheckpointReporter = packer.NewCheckpointReporter(
+			config.DisableCheckpointSignature,
+		)
+	}
+
+	// Create the configuration for panicwrap and wrap our executable
+	wrapConfig.Handler = panicHandler(logTempFile)
+	wrapConfig.Writer = io.MultiWriter(logTempFile, &packersdk.LogSecretFilter)
+	wrapConfig.Stdout = outW
+	wrapConfig.DetectDuration = 500 * time.Millisecond
+	wrapConfig.ForwardSignals = []os.Signal{syscall.SIGTERM}
+	exitStatus, err := panicwrap.Wrap(&wrapConfig)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Couldn't start Packer: %s", err)
+		return 1
+	}
+
+	// If >= 0, we're the parent, so just exit
+	if exitStatus >= 0 {
+		// Close the stdout writer so that our copy process can finish
+		outW.Close()
+
+		// Wait for the output copying to finish
+		<-doneCh
+
+		return exitStatus
+	}
+
+	// We're the child, so just close the tempfile we made in order to
+	// save file handles since the tempfile is only used by the parent.
+	logTempFile.Close()
+
+	return 0
 }
 
 // wrappedMain is called only when we're wrapped by panicwrap and
@@ -132,10 +131,10 @@ func wrappedMain() int {
 		runtime.GOMAXPROCS(runtime.NumCPU())
 	}
 
-	packer.LogSecretFilter.SetOutput(os.Stderr)
-	log.SetOutput(&packer.LogSecretFilter)
+	packersdk.LogSecretFilter.SetOutput(os.Stderr)
+	log.SetOutput(&packersdk.LogSecretFilter)
 
-	inPlugin := os.Getenv(plugin.MagicCookieKey) == plugin.MagicCookieValue
+	inPlugin := inPlugin()
 	if inPlugin {
 		// This prevents double-logging timestamps
 		log.SetFlags(0)
@@ -165,20 +164,20 @@ func wrappedMain() int {
 		)
 	}
 
-	cacheDir, err := packer.CachePath()
+	cacheDir, err := packersdk.CachePath()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error preparing cache directory: \n\n%s\n", err)
 		return 1
 	}
-	log.Printf("Setting cache directory: %s", cacheDir)
+	log.Printf("[INFO] Setting cache directory: %s", cacheDir)
 
 	// Determine if we're in machine-readable mode by mucking around with
 	// the arguments...
 	args, machineReadable := extractMachineReadable(os.Args[1:])
 
-	defer plugin.CleanupClients()
+	defer packer.CleanupClients()
 
-	var ui packer.Ui
+	var ui packersdk.Ui
 	if machineReadable {
 		// Setup the UI as we're being machine-readable
 		ui = &packer.MachineReadableUi{
@@ -192,10 +191,11 @@ func wrappedMain() int {
 			return 1
 		}
 	} else {
-		basicUi := &packer.BasicUi{
+		basicUi := &packersdk.BasicUi{
 			Reader:      os.Stdin,
 			Writer:      os.Stdout,
 			ErrorWriter: os.Stdout,
+			PB:          &packersdk.NoopProgressTracker{},
 		}
 		ui = basicUi
 		if !inPlugin {
@@ -211,6 +211,7 @@ func wrappedMain() int {
 				fmt.Fprintf(os.Stderr, "No tty available: %s\n", err)
 			} else {
 				basicUi.TTY = TTY
+				basicUi.PB = &packer.UiProgressBar{}
 				defer TTY.Close()
 			}
 		}
@@ -219,11 +220,8 @@ func wrappedMain() int {
 	CommandMeta = &command.Meta{
 		CoreConfig: &packer.CoreConfig{
 			Components: packer.ComponentFinder{
-				Hook: config.StarHook,
-
-				BuilderStore:       config.Builders,
-				ProvisionerStore:   config.Provisioners,
-				PostProcessorStore: config.PostProcessors,
+				Hook:         config.StarHook,
+				PluginConfig: config.Plugins,
 			},
 			Version: version.Version,
 		},
@@ -295,33 +293,35 @@ func extractMachineReadable(args []string) ([]string, bool) {
 
 func loadConfig() (*config, error) {
 	var config config
-	config.PluginMinPort = 10000
-	config.PluginMaxPort = 25000
-	config.Builders = packer.MapOfBuilder{}
-	config.PostProcessors = packer.MapOfPostProcessor{}
-	config.Provisioners = packer.MapOfProvisioner{}
-	if err := config.Discover(); err != nil {
+	config.Plugins = &packer.PluginConfig{
+		PluginMinPort:      10000,
+		PluginMaxPort:      25000,
+		KnownPluginFolders: packer.PluginFolders("."),
+	}
+	if err := config.Plugins.Discover(); err != nil {
+		return nil, err
+	}
+
+	// Finally, try to use an internal plugin. Note that this will not override
+	// any previously-loaded plugins.
+	if err := config.discoverInternalComponents(); err != nil {
 		return nil, err
 	}
 
 	// start by loading from PACKER_CONFIG if available
-	log.Print("Checking 'PACKER_CONFIG' for a config file path")
 	configFilePath := os.Getenv("PACKER_CONFIG")
-
 	if configFilePath == "" {
 		var err error
-		log.Print("'PACKER_CONFIG' not set; checking the default config file path")
-		configFilePath, err = packer.ConfigFile()
+		log.Print("[INFO] PACKER_CONFIG env var not set; checking the default config file path")
+		configFilePath, err = pathing.ConfigFile()
 		if err != nil {
 			log.Printf("Error detecting default config file path: %s", err)
 		}
 	}
-
 	if configFilePath == "" {
 		return &config, nil
 	}
-
-	log.Printf("Attempting to open config file: %s", configFilePath)
+	log.Printf("[INFO] PACKER_CONFIG env var set; attempting to open config file: %s", configFilePath)
 	f, err := os.Open(configFilePath)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -383,6 +383,10 @@ func copyOutput(r io.Reader, doneCh chan<- struct{}) {
 	}()
 
 	wg.Wait()
+}
+
+func inPlugin() bool {
+	return os.Getenv(pluginsdk.MagicCookieKey) == pluginsdk.MagicCookieValue
 }
 
 func init() {

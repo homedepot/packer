@@ -6,21 +6,21 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/hashicorp/packer/builder"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/packerbuilderdata"
 
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/compute/v1"
 	ycsdk "github.com/yandex-cloud/go-sdk"
 )
 
 type stepCreateImage struct {
-	GeneratedData *builder.GeneratedData
+	GeneratedData *packerbuilderdata.GeneratedData
 }
 
 func (s *stepCreateImage) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	sdk := state.Get("sdk").(*ycsdk.SDK)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	c := state.Get("config").(*Config)
 	diskID := state.Get("disk_id").(string)
 
@@ -41,22 +41,23 @@ func (s *stepCreateImage) Run(ctx context.Context, state multistep.StateBag) mul
 		},
 	}))
 	if err != nil {
-		return stepHaltWithError(state, fmt.Errorf("Error creating image: %s", err))
+		return StepHaltWithError(state, fmt.Errorf("Error creating image: %s", err))
 	}
 
 	ui.Say("Waiting for image to complete...")
 	if err := op.Wait(ctx); err != nil {
-		return stepHaltWithError(state, fmt.Errorf("Error waiting for image: %s", err))
+		return StepHaltWithError(state, fmt.Errorf("Error waiting for image: %s", err))
 	}
 
 	resp, err := op.Response()
 	if err != nil {
-		return stepHaltWithError(state, err)
+		return StepHaltWithError(state, err)
 	}
+	ui.Say("Success image create...")
 
 	image, ok := resp.(*compute.Image)
 	if !ok {
-		return stepHaltWithError(state, errors.New("API call response doesn't contain Compute Image"))
+		return StepHaltWithError(state, errors.New("API call response doesn't contain Compute Image"))
 	}
 
 	log.Printf("Image ID: %s", image.Id)

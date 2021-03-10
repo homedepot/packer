@@ -21,7 +21,6 @@ func testConfig(accessConfFile *os.File) map[string]interface{} {
 
 		// Image
 		"base_image_ocid": "ocd1...",
-		"shape":           "VM.Standard1.1",
 		"image_name":      "HelloWorld",
 
 		// Networking
@@ -36,6 +35,17 @@ func testConfig(accessConfFile *os.File) map[string]interface{} {
 		"defined_tags": map[string]map[string]interface{}{
 			"namespace": {"key": "value"},
 		},
+
+		// Instance Details
+		"instance_name": "hello-world",
+		"instance_tags": map[string]string{
+			"key": "value",
+		},
+		"create_vnic_details": map[string]interface{}{
+			"nsg_ids": []string{"ocd1..."},
+		},
+		"shape":     "VM.Standard1.1",
+		"disk_size": 60,
 	}
 }
 
@@ -73,6 +83,47 @@ func TestConfig(t *testing.T) {
 		var c Config
 		errs := c.Prepare(raw)
 
+		if errs != nil {
+			t.Fatalf("Unexpected error in configuration %+v", errs)
+		}
+	})
+
+	t.Run("BaseImageFilterWithoutOCID", func(t *testing.T) {
+		raw := testConfig(cfgFile)
+		raw["base_image_ocid"] = ""
+		raw["base_image_filter"] = map[string]interface{}{
+			"display_name": "hello_world",
+		}
+
+		var c Config
+		errs := c.Prepare(raw)
+
+		if errs != nil {
+			t.Fatalf("Unexpected error in configuration %+v", errs)
+		}
+	})
+
+	t.Run("BaseImageFilterDefault", func(t *testing.T) {
+		raw := testConfig(cfgFile)
+
+		var c Config
+		errs := c.Prepare(raw)
+		if errs != nil {
+			t.Fatalf("Unexpected error in configuration %+v", errs)
+		}
+
+		if *c.BaseImageFilter.Shape != raw["shape"] {
+			t.Fatalf("Default base_image_filter shape %v does not equal config shape %v",
+				*c.BaseImageFilter.Shape, raw["shape"])
+		}
+	})
+
+	t.Run("LaunchMode", func(t *testing.T) {
+		raw := testConfig(cfgFile)
+		raw["image_launch_mode"] = "NATIVE"
+
+		var c Config
+		errs := c.Prepare(raw)
 		if errs != nil {
 			t.Fatalf("Unexpected error in configuration %+v", errs)
 		}

@@ -1,7 +1,7 @@
 //go:generate struct-markdown
 //go:generate mapstructure-to-hcl2 -type Config,BlockDevice
 
-// The ebsvolume package contains a packer.Builder implementation that builds
+// The ebsvolume package contains a packersdk.Builder implementation that builds
 // EBS volumes for Amazon EC2 using an ephemeral instance,
 package ebsvolume
 
@@ -12,15 +12,15 @@ import (
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/hashicorp/hcl/v2/hcldec"
-	"github.com/hashicorp/packer/builder"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/packerbuilderdata"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	awscommon "github.com/hashicorp/packer/builder/amazon/common"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/hcl2template"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
 )
 
 const BuilderId = "mitchellh.amazon.ebsvolume"
@@ -58,7 +58,7 @@ type Config struct {
 	// *launched* to create EBS Volumes. These tags will *not* appear in the
 	// tags of the resulting EBS volumes unless they're duplicated under `tags`
 	// in the `ebs_volumes` setting. This is a [template
-	// engine](/docs/templates/engine), see [Build template
+	// engine](/docs/templates/legacy_json_templates/engine), see [Build template
 	// data](#build-template-data) for more information.
 	//
 	//  Note: The tags specified here will be *temporarily* applied to volumes
@@ -70,9 +70,9 @@ type Config struct {
 	// Same as [`run_volume_tags`](#run_volume_tags) but defined as a singular
 	// repeatable block containing a `key` and a `value` field. In HCL2 mode
 	// the
-	// [`dynamic_block`](/docs/configuration/from-1.5/expressions#dynamic-blocks)
+	// [`dynamic_block`](/docs/templates/hcl_templates/expressions#dynamic-blocks)
 	// will allow you to create those programatically.
-	VolumeRunTag hcl2template.KeyValues `mapstructure:"run_volume_tag"`
+	VolumeRunTag config.KeyValues `mapstructure:"run_volume_tag"`
 
 	launchBlockDevices BlockDevices
 
@@ -100,34 +100,43 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 		SourceAMI:   `{{ .SourceAMI }} `,
 	}
 	err := config.Decode(&b.config, &config.DecodeOpts{
+		PluginType:         BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &b.config.ctx,
+		InterpolateFilter: &interpolate.RenderFilter{
+			Exclude: []string{
+				"run_tags",
+				"run_tag",
+				"run_volume_tags",
+				"run_volume_tag",
+				"spot_tags",
+				"spot_tag",
+				"tags",
+				"tag",
+			},
+		},
 	}, raws...)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// Accumulate any errors
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 	var warns []string
-	errs = packer.MultiErrorAppend(errs, b.config.VolumeRunTag.CopyOn(&b.config.VolumeRunTags)...)
-	errs = packer.MultiErrorAppend(errs, b.config.AccessConfig.Prepare(&b.config.ctx)...)
-	errs = packer.MultiErrorAppend(errs, b.config.RunConfig.Prepare(&b.config.ctx)...)
-	errs = packer.MultiErrorAppend(errs, b.config.launchBlockDevices.Prepare(&b.config.ctx)...)
 
-	for _, d := range b.config.VolumeMappings {
-		if err := d.Prepare(&b.config.ctx); err != nil {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("AMIMapping: %s", err.Error()))
-		}
-	}
+	errs = packersdk.MultiErrorAppend(errs, b.config.VolumeRunTag.CopyOn(&b.config.VolumeRunTags)...)
+	errs = packersdk.MultiErrorAppend(errs, b.config.AccessConfig.Prepare()...)
+	errs = packersdk.MultiErrorAppend(errs, b.config.RunConfig.Prepare(&b.config.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, b.config.launchBlockDevices.Prepare(&b.config.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, b.config.VolumeMappings.Prepare(&b.config.ctx)...)
 
 	b.config.launchBlockDevices = b.config.VolumeMappings
 	if err != nil {
-		errs = packer.MultiErrorAppend(errs, err)
+		errs = packersdk.MultiErrorAppend(errs, err)
 	}
 
 	if b.config.IsSpotInstance() && ((b.config.AMIENASupport.True()) || b.config.AMISriovNetSupport) {
-		errs = packer.MultiErrorAppend(errs,
+		errs = packersdk.MultiErrorAppend(errs,
 			fmt.Errorf("Spot instances do not support modification, which is required "+
 				"when either `ena_support` or `sriov_support` are set. Please ensure "+
 				"you use an AMI that already has either SR-IOV or ENA enabled."))
@@ -145,13 +154,13 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 		return nil, warns, errs
 	}
 
-	packer.LogSecretFilter.Set(b.config.AccessKey, b.config.SecretKey, b.config.Token)
+	packersdk.LogSecretFilter.Set(b.config.AccessKey, b.config.SecretKey, b.config.Token)
 
 	generatedData := awscommon.GetGeneratedDataList()
 	return generatedData, warns, nil
 }
 
-func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (packer.Artifact, error) {
+func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook) (packersdk.Artifact, error) {
 	session, err := b.config.Session()
 	if err != nil {
 		return nil, err
@@ -167,7 +176,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 	state.Put("iam", iam)
 	state.Put("hook", hook)
 	state.Put("ui", ui)
-	generatedData := &builder.GeneratedData{State: state}
+	generatedData := &packerbuilderdata.GeneratedData{State: state}
 
 	var instanceStep multistep.Step
 
@@ -182,8 +191,12 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			Debug:                             b.config.PackerDebug,
 			EbsOptimized:                      b.config.EbsOptimized,
 			ExpectedRootDevice:                "ebs",
+			HttpEndpoint:                      b.config.Metadata.HttpEndpoint,
+			HttpTokens:                        b.config.Metadata.HttpTokens,
+			HttpPutResponseHopLimit:           b.config.Metadata.HttpPutResponseHopLimit,
 			InstanceInitiatedShutdownBehavior: b.config.InstanceInitiatedShutdownBehavior,
 			InstanceType:                      b.config.InstanceType,
+			Region:                            *ec2conn.Config.Region,
 			SourceAMI:                         b.config.SourceAmi,
 			SpotInstanceTypes:                 b.config.SpotInstanceTypes,
 			SpotPrice:                         b.config.SpotPrice,
@@ -204,11 +217,15 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			EbsOptimized:                      b.config.EbsOptimized,
 			EnableT2Unlimited:                 b.config.EnableT2Unlimited,
 			ExpectedRootDevice:                "ebs",
+			HttpEndpoint:                      b.config.Metadata.HttpEndpoint,
+			HttpTokens:                        b.config.Metadata.HttpTokens,
+			HttpPutResponseHopLimit:           b.config.Metadata.HttpPutResponseHopLimit,
 			InstanceInitiatedShutdownBehavior: b.config.InstanceInitiatedShutdownBehavior,
 			InstanceType:                      b.config.InstanceType,
 			IsRestricted:                      b.config.IsChinaCloud() || b.config.IsGovCloud(),
 			SourceAMI:                         b.config.SourceAmi,
 			Tags:                              b.config.RunTags,
+			Tenancy:                           b.config.Tenancy,
 			UserData:                          b.config.UserData,
 			UserDataFile:                      b.config.UserDataFile,
 			VolumeTags:                        b.config.VolumeRunTags,
@@ -263,6 +280,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 		&awscommon.StepCreateSSMTunnel{
 			AWSSession:       session,
 			Region:           *ec2conn.Config.Region,
+			PauseBeforeSSM:   b.config.PauseBeforeSSM,
 			LocalPortNumber:  b.config.SessionManagerPort,
 			RemotePortNumber: b.config.Comm.Port(),
 			SSMAgentEnabled:  b.config.SSMAgentEnabled(),
@@ -283,8 +301,8 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 		&awscommon.StepSetGeneratedData{
 			GeneratedData: generatedData,
 		},
-		&common.StepProvision{},
-		&common.StepCleanupTempKeys{
+		&commonsteps.StepProvision{},
+		&commonsteps.StepCleanupTempKeys{
 			Comm: &b.config.RunConfig.Comm,
 		},
 		&awscommon.StepStopEBSBackedInstance{
@@ -296,10 +314,16 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			EnableAMISriovNetSupport: b.config.AMISriovNetSupport,
 			EnableAMIENASupport:      b.config.AMIENASupport,
 		},
+		&stepSnapshotEBSVolumes{
+			PollingConfig: b.config.PollingConfig,
+			VolumeMapping: b.config.VolumeMappings,
+			AccessConfig:  &b.config.AccessConfig,
+			Ctx:           b.config.ctx,
+		},
 	}
 
 	// Run!
-	b.runner = common.NewRunner(steps, b.config.PackerConfig, ui)
+	b.runner = commonsteps.NewRunner(steps, b.config.PackerConfig, ui)
 	b.runner.Run(ctx, state)
 
 	// If there was an error, return that
@@ -310,6 +334,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 	// Build the artifact and return it
 	artifact := &Artifact{
 		Volumes:        state.Get("ebsvolumes").(EbsVolumes),
+		Snapshots:      state.Get("ebssnapshots").(EbsSnapshots),
 		BuilderIdValue: BuilderId,
 		Conn:           ec2conn,
 		StateData:      map[string]interface{}{"generated_data": state.Get("generated_data")},

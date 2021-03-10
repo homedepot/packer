@@ -5,11 +5,11 @@ import (
 	"os"
 	"testing"
 
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	ucloudcommon "github.com/hashicorp/packer/builder/ucloud/common"
-	"github.com/hashicorp/packer/packer"
 	"github.com/stretchr/testify/assert"
 
-	builderT "github.com/hashicorp/packer/helper/builder/testing"
+	builderT "github.com/hashicorp/packer-plugin-sdk/acctest"
 )
 
 func TestBuilderAcc_validateRegion(t *testing.T) {
@@ -124,7 +124,7 @@ func testBuilderAccRegionCopy(projectId string) string {
 }
 
 func checkRegionCopy(projectId string, imageDst []ucloudcommon.ImageDestination) builderT.TestCheckFunc {
-	return func(artifacts []packer.Artifact) error {
+	return func(artifacts []packersdk.Artifact) error {
 		if len(artifacts) > 1 {
 			return fmt.Errorf("more than 1 artifact")
 		}

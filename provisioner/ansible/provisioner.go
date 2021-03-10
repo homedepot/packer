@@ -30,12 +30,13 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/common/adapter"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/packer/tmp"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/adapter"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/tmp"
 )
 
 type Config struct {
@@ -56,6 +57,10 @@ type Config struct {
 	// ```json
 	//   "extra_arguments": [ "--extra-vars", "Region={{user `Region`}} Stage={{user `Stage`}}" ]
 	// ```
+	// In certain scenarios where you want to pass ansible command line arguments
+	// that include parameter and value (for example `--vault-password-file pwfile`),
+	// from ansible documentation this is correct format but that is NOT accepted here.
+	// Instead you need to do it like `--vault-password-file=pwfile`.
 	//
 	// If you are running a Windows build on AWS, Azure, Google Compute, or OpenStack
 	// and would like to access the auto-generated password that Packer uses to
@@ -75,7 +80,7 @@ type Config struct {
 	//     "ansible_env_vars": [ "ANSIBLE_HOST_KEY_CHECKING=False", "ANSIBLE_SSH_ARGS='-o ForwardAgent=yes -o ControlMaster=auto -o ControlPersist=60s'", "ANSIBLE_NOCOLOR=True" ]
 	//   ```
 	//
-	//   This is a [template engine](/docs/templates/engine). Therefore, you
+	//   This is a [template engine](/docs/templates/legacy_json_templates/engine). Therefore, you
 	//   may use user variables and template functions in this field.
 	//
 	//   For example, if you are running a Windows build on AWS, Azure,
@@ -162,8 +167,8 @@ type Config struct {
 	//  test your playbook. this option is not used if you set an `inventory_file`.
 	KeepInventoryFile bool `mapstructure:"keep_inventory_file"`
 	// A requirements file which provides a way to
-	//  install roles with the [ansible-galaxy
-	//  cli](http://docs.ansible.com/ansible/galaxy.html#the-ansible-galaxy-command-line-tool)
+	//  install roles or collections with the [ansible-galaxy
+	//  cli](https://docs.ansible.com/ansible/latest/galaxy/user_guide.html#the-ansible-galaxy-command-line-tool)
 	//  on the local machine before executing `ansible-playbook`. By default, this is empty.
 	GalaxyFile string `mapstructure:"galaxy_file"`
 	// The command to invoke ansible-galaxy. By default, this is
@@ -173,11 +178,16 @@ type Config struct {
 	//  Adds `--force` option to `ansible-galaxy` command. By default, this is
 	//  `false`.
 	GalaxyForceInstall bool `mapstructure:"galaxy_force_install"`
-	// The path to the directory on your local system to
-	//   install the roles in. Adds `--roles-path /path/to/your/roles` to
+	// The path to the directory on your local system in which to
+	//   install the roles. Adds `--roles-path /path/to/your/roles` to
 	//   `ansible-galaxy` command. By default, this is empty, and thus `--roles-path`
 	//   option is not added to the command.
 	RolesPath string `mapstructure:"roles_path"`
+	// The path to the directory on your local system in which to
+	//   install the collections. Adds `--collections-path /path/to/your/collections` to
+	//   `ansible-galaxy` command. By default, this is empty, and thus `--collections-path`
+	//   option is not added to the command.
+	CollectionsPath string `mapstructure:"collections_path"`
 	// When `true`, set up a localhost proxy adapter
 	// so that Ansible has an IP address to connect to, even if your guest does not
 	// have an IP address. For example, the adapter is necessary for Docker builds
@@ -208,8 +218,8 @@ type Provisioner struct {
 	ansibleMajVersion uint
 	generatedData     map[string]interface{}
 
-	setupAdapterFunc   func(ui packer.Ui, comm packer.Communicator) (string, error)
-	executeAnsibleFunc func(ui packer.Ui, comm packer.Communicator, privKeyFile string) error
+	setupAdapterFunc   func(ui packersdk.Ui, comm packersdk.Communicator) (string, error)
+	executeAnsibleFunc func(ui packersdk.Ui, comm packersdk.Communicator, privKeyFile string) error
 }
 
 func (p *Provisioner) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMapstructure().HCL2Spec() }
@@ -218,6 +228,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 	p.done = make(chan struct{})
 
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         "ansible",
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -243,17 +254,17 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		p.config.HostAlias = "default"
 	}
 
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 	err = validateFileConfig(p.config.PlaybookFile, "playbook_file", true)
 	if err != nil {
-		errs = packer.MultiErrorAppend(errs, err)
+		errs = packersdk.MultiErrorAppend(errs, err)
 	}
 
 	// Check that the galaxy file exists, if configured
 	if len(p.config.GalaxyFile) > 0 {
 		err = validateFileConfig(p.config.GalaxyFile, "galaxy_file", true)
 		if err != nil {
-			errs = packer.MultiErrorAppend(errs, err)
+			errs = packersdk.MultiErrorAppend(errs, err)
 		}
 	}
 
@@ -262,14 +273,14 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		err = validateFileConfig(p.config.SSHAuthorizedKeyFile, "ssh_authorized_key_file", true)
 		if err != nil {
 			log.Println(p.config.SSHAuthorizedKeyFile, "does not exist")
-			errs = packer.MultiErrorAppend(errs, err)
+			errs = packersdk.MultiErrorAppend(errs, err)
 		}
 	}
 	if len(p.config.SSHHostKeyFile) > 0 {
 		err = validateFileConfig(p.config.SSHHostKeyFile, "ssh_host_key_file", true)
 		if err != nil {
 			log.Println(p.config.SSHHostKeyFile, "does not exist")
-			errs = packer.MultiErrorAppend(errs, err)
+			errs = packersdk.MultiErrorAppend(errs, err)
 		}
 	} else {
 		p.config.AnsibleEnvVars = append(p.config.AnsibleEnvVars, "ANSIBLE_HOST_KEY_CHECKING=False")
@@ -280,21 +291,21 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 	}
 
 	if p.config.LocalPort > 65535 {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("local_port: %d must be a valid port", p.config.LocalPort))
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("local_port: %d must be a valid port", p.config.LocalPort))
 	}
 
 	if len(p.config.InventoryDirectory) > 0 {
 		err = validateInventoryDirectoryConfig(p.config.InventoryDirectory)
 		if err != nil {
 			log.Println(p.config.InventoryDirectory, "does not exist")
-			errs = packer.MultiErrorAppend(errs, err)
+			errs = packersdk.MultiErrorAppend(errs, err)
 		}
 	}
 
 	if !p.config.SkipVersionCheck {
 		err = p.getVersion()
 		if err != nil {
-			errs = packer.MultiErrorAppend(errs, err)
+			errs = packersdk.MultiErrorAppend(errs, err)
 		}
 	}
 
@@ -302,13 +313,13 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		p.config.userWasEmpty = true
 		usr, err := user.Current()
 		if err != nil {
-			errs = packer.MultiErrorAppend(errs, err)
+			errs = packersdk.MultiErrorAppend(errs, err)
 		} else {
 			p.config.User = usr.Username
 		}
 	}
 	if p.config.User == "" {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("user: could not determine current user from environment."))
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("user: could not determine current user from environment."))
 	}
 
 	// These fields exist so that we can replace the functions for testing
@@ -354,7 +365,7 @@ func (p *Provisioner) getVersion() error {
 	return nil
 }
 
-func (p *Provisioner) setupAdapter(ui packer.Ui, comm packer.Communicator) (string, error) {
+func (p *Provisioner) setupAdapter(ui packersdk.Ui, comm packersdk.Communicator) (string, error) {
 	ui.Message("Setting up proxy adapter for Ansible....")
 
 	k, err := newUserKey(p.config.SSHAuthorizedKeyFile)
@@ -370,7 +381,7 @@ func (p *Provisioner) setupAdapter(ui packer.Ui, comm packer.Communicator) (stri
 	keyChecker := ssh.CertChecker{
 		UserKeyFallback: func(conn ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
 			if user := conn.User(); user != p.config.User {
-				return nil, errors.New(fmt.Sprintf("authentication failed: %s is not a valid user", user))
+				return nil, fmt.Errorf("authentication failed: %s is not a valid user", user)
 			}
 
 			if !bytes.Equal(k.Marshal(), pubKey.Marshal()) {
@@ -425,7 +436,7 @@ func (p *Provisioner) setupAdapter(ui packer.Ui, comm packer.Communicator) (stri
 		return "", err
 	}
 
-	ui = &packer.SafeUi{
+	ui = &packersdk.SafeUi{
 		Sem: make(chan int, 1),
 		Ui:  ui,
 	}
@@ -495,7 +506,7 @@ func (p *Provisioner) createInventoryFile() error {
 	return nil
 }
 
-func (p *Provisioner) Provision(ctx context.Context, ui packer.Ui, comm packer.Communicator, generatedData map[string]interface{}) error {
+func (p *Provisioner) Provision(ctx context.Context, ui packersdk.Ui, comm packersdk.Communicator, generatedData map[string]interface{}) error {
 	ui.Say("Provisioning with Ansible...")
 	// Interpolate env vars to check for generated values like password and port
 	p.generatedData = generatedData
@@ -620,20 +631,56 @@ func (p *Provisioner) Provision(ctx context.Context, ui packer.Ui, comm packer.C
 	return nil
 }
 
-func (p *Provisioner) executeGalaxy(ui packer.Ui, comm packer.Communicator) error {
+func (p *Provisioner) executeGalaxy(ui packersdk.Ui, comm packersdk.Communicator) error {
 	galaxyFile := filepath.ToSlash(p.config.GalaxyFile)
 
 	// ansible-galaxy install -r requirements.yml
-	args := []string{"install", "-r", galaxyFile}
+	roleArgs := []string{"install", "-r", galaxyFile}
+	// Instead of modifying args depending on config values and removing or modifying values from
+	// the slice between role and collection installs, just use 2 slices and simplify everything
+	collectionArgs := []string{"collection", "install", "-r", galaxyFile}
 	// Add force to arguments
 	if p.config.GalaxyForceInstall {
-		args = append(args, "-f")
-	}
-	// Add roles_path argument if specified
-	if p.config.RolesPath != "" {
-		args = append(args, "-p", filepath.ToSlash(p.config.RolesPath))
+		roleArgs = append(roleArgs, "-f")
+		collectionArgs = append(collectionArgs, "-f")
 	}
 
+	// Add roles_path argument if specified
+	if p.config.RolesPath != "" {
+		roleArgs = append(roleArgs, "-p", filepath.ToSlash(p.config.RolesPath))
+	}
+	// Add collections_path argument if specified
+	if p.config.CollectionsPath != "" {
+		collectionArgs = append(collectionArgs, "-p", filepath.ToSlash(p.config.CollectionsPath))
+	}
+
+	// Search galaxy_file for roles and collections keywords
+	f, err := ioutil.ReadFile(galaxyFile)
+	if err != nil {
+		return err
+	}
+	hasRoles, _ := regexp.Match(`(?m)^roles:`, f)
+	hasCollections, _ := regexp.Match(`(?m)^collections:`, f)
+
+	// If if roles keyword present (v2 format), or no collections keywork present (v1), install roles
+	if hasRoles || !hasCollections {
+		if roleInstallError := p.invokeGalaxyCommand(roleArgs, ui, comm); roleInstallError != nil {
+			return roleInstallError
+		}
+	}
+
+	// If collections keyword present (v2 format), install collections
+	if hasCollections {
+		if collectionInstallError := p.invokeGalaxyCommand(collectionArgs, ui, comm); collectionInstallError != nil {
+			return collectionInstallError
+		}
+	}
+
+	return nil
+}
+
+// Intended to be invoked from p.executeGalaxy depending on the Ansible Galaxy parameters passed to Packer
+func (p *Provisioner) invokeGalaxyCommand(args []string, ui packersdk.Ui, comm packersdk.Communicator) error {
 	ui.Message(fmt.Sprintf("Executing Ansible Galaxy"))
 	cmd := exec.Command(p.config.GalaxyCommand, args...)
 
@@ -697,7 +744,7 @@ func (p *Provisioner) createCmdArgs(httpAddr, inventory, playbook, privKeyFile s
 	args = append(args, "-e", fmt.Sprintf("packer_builder_type=%s", p.config.PackerBuilderType))
 
 	// expose packer_http_addr extra variable
-	if httpAddr != common.HttpAddrNotImplemented {
+	if httpAddr != commonsteps.HttpAddrNotImplemented {
 		args = append(args, "-e", fmt.Sprintf("packer_http_addr=%s", httpAddr))
 	}
 
@@ -738,7 +785,7 @@ func (p *Provisioner) createCmdArgs(httpAddr, inventory, playbook, privKeyFile s
 	return args, envVars
 }
 
-func (p *Provisioner) executeAnsible(ui packer.Ui, comm packer.Communicator, privKeyFile string) error {
+func (p *Provisioner) executeAnsible(ui packersdk.Ui, comm packersdk.Communicator, privKeyFile string) error {
 	playbook, _ := filepath.Abs(p.config.PlaybookFile)
 	inventory := p.config.InventoryFile
 	httpAddr := p.generatedData["PackerHTTPAddr"].(string)

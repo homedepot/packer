@@ -8,10 +8,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/hashicorp/packer/common/uuid"
-	"github.com/hashicorp/packer/hcl2template"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/uuid"
 	"github.com/pkg/errors"
 )
 
@@ -89,9 +89,9 @@ type TencentCloudRunConfig struct {
 	RunTags map[string]string `mapstructure:"run_tags" required:"false"`
 	// Same as [`run_tags`](#run_tags) but defined as a singular repeatable
 	// block containing a `key` and a `value` field. In HCL2 mode the
-	// [`dynamic_block`](/docs/configuration/from-1.5/expressions#dynamic-blocks)
+	// [`dynamic_block`](/docs/templates/hcl_templates/expressions#dynamic-blocks)
 	// will allow you to create those programatically.
-	RunTag hcl2template.KeyValues `mapstructure:"run_tag" required:"false"`
+	RunTag config.KeyValues `mapstructure:"run_tag" required:"false"`
 
 	// Communicator settings
 	Comm         communicator.Config `mapstructure:",squash"`

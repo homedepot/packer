@@ -15,16 +15,17 @@ import (
 
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/dgrijalva/jwt-go"
+	"github.com/hashicorp/packer/builder/azure/pkcs12"
 )
 
-func NewCertOAuthTokenProvider(env azure.Environment, clientID, clientCertPath, tenantID string) (oAuthTokenProvider, error) {
+func NewCertOAuthTokenProvider(env azure.Environment, clientID, clientCertPath, tenantID string, certExpireTimeout time.Duration) (oAuthTokenProvider, error) {
 	cert, key, err := readCert(clientCertPath)
 	if err != nil {
 		return nil, fmt.Errorf("Error reading certificate: %v", err)
 	}
 
 	audience := fmt.Sprintf("%s%s/oauth2/token", env.ActiveDirectoryEndpoint, tenantID)
-	jwt, err := makeJWT(clientID, audience, cert, key, time.Hour, true)
+	jwt, err := makeJWT(clientID, audience, cert, key, certExpireTimeout, true)
 	if err != nil {
 		return nil, fmt.Errorf("Error generating JWT: %v", err)
 	}
@@ -124,7 +125,16 @@ func readCert(file string) (cert *x509.Certificate, key interface{}, err error) 
 	}
 
 	if key == nil {
-		return nil, nil, fmt.Errorf("Did not find private key in pem file")
+		key, cert, err = pkcs12.Decode(d, "")
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"Did not find private key in file, tried to read as PKCS#12 and failed: %v", err)
+		}
+		certs = append(certs, cert)
+	}
+
+	if key == nil {
+		return nil, nil, fmt.Errorf("Did not find private key in file")
 	}
 
 	// find the certificate that belongs to the private key by comparing the public keys
@@ -148,7 +158,7 @@ func readCert(file string) (cert *x509.Certificate, key interface{}, err error) 
 	}
 
 	if cert == nil {
-		return nil, nil, fmt.Errorf("Did not find certificate belonging to private key in pem file")
+		return nil, nil, fmt.Errorf("Did not find certificate belonging to private key in file")
 	}
 
 	return cert, key, nil

@@ -3,8 +3,8 @@ package classic
 import (
 	"context"
 
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 )
 
 type stepConnectBuilder struct {

@@ -3,9 +3,10 @@ package yandexexport
 import (
 	"testing"
 
+	"github.com/hashicorp/packer/builder/yandex"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 )
 
 func TestPostProcessor_Configure(t *testing.T) {
@@ -26,8 +27,18 @@ func TestPostProcessor_Configure(t *testing.T) {
 			name: "no one creds",
 			fields: fields{
 				config: Config{
-					Token:                 "",
-					ServiceAccountKeyFile: "",
+					AccessConfig: yandex.AccessConfig{
+						Token:                 "",
+						ServiceAccountKeyFile: "",
+					},
+					ExchangeConfig: ExchangeConfig{
+						ServiceAccountID: "some-srv-acc-id",
+					},
+					CommonConfig: yandex.CommonConfig{
+						CloudConfig: yandex.CloudConfig{
+							FolderID: "some-folder-id",
+						},
+					},
 				},
 			},
 			wantErr: false,
@@ -36,8 +47,18 @@ func TestPostProcessor_Configure(t *testing.T) {
 			name: "both token and sa key file",
 			fields: fields{
 				config: Config{
-					Token:                 "some-value",
-					ServiceAccountKeyFile: "path/not-exist.file",
+					AccessConfig: yandex.AccessConfig{
+						Token:                 "some-value",
+						ServiceAccountKeyFile: "path/not-exist.file",
+					},
+					ExchangeConfig: ExchangeConfig{
+						ServiceAccountID: "some-srv-acc-id",
+					},
+					CommonConfig: yandex.CommonConfig{
+						CloudConfig: yandex.CloudConfig{
+							FolderID: "some-folder-id",
+						},
+					},
 				},
 			},
 			wantErr: true,
@@ -46,11 +67,59 @@ func TestPostProcessor_Configure(t *testing.T) {
 			name: "use sa key file",
 			fields: fields{
 				config: Config{
-					Token:                 "",
-					ServiceAccountKeyFile: "testdata/fake-sa-key.json",
+					AccessConfig: yandex.AccessConfig{
+						Token:                 "",
+						ServiceAccountKeyFile: "testdata/fake-sa-key.json",
+					},
+					ExchangeConfig: ExchangeConfig{
+						ServiceAccountID: "some-srv-acc-id",
+					},
+					CommonConfig: yandex.CommonConfig{
+						CloudConfig: yandex.CloudConfig{
+							FolderID: "some-folder-id",
+						},
+					},
 				},
 			},
 			wantErr: false,
+		},
+		{
+			name: "service_account_id required",
+			fields: fields{
+				config: Config{
+					AccessConfig: yandex.AccessConfig{
+						Token: "some token",
+					},
+					ExchangeConfig: ExchangeConfig{
+						ServiceAccountID: "",
+					},
+					CommonConfig: yandex.CommonConfig{
+						CloudConfig: yandex.CloudConfig{
+							FolderID: "some-folder-id",
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "folderID required",
+			fields: fields{
+				config: Config{
+					AccessConfig: yandex.AccessConfig{
+						Token: "some token",
+					},
+					ExchangeConfig: ExchangeConfig{
+						ServiceAccountID: "some-srv-acc-id",
+					},
+					CommonConfig: yandex.CommonConfig{
+						CloudConfig: yandex.CloudConfig{
+							FolderID: "",
+						},
+					},
+				},
+			},
+			wantErr: true,
 		},
 	}
 	for _, tt := range tests {

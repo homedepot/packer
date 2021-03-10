@@ -6,57 +6,32 @@ package vm
 import (
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
+	"github.com/hashicorp/packer-plugin-sdk/bootcommand"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	vboxcommon "github.com/hashicorp/packer/builder/virtualbox/common"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/common/bootcommand"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
 )
 
 // Config is the configuration structure for the builder.
 type Config struct {
-	common.PackerConfig          `mapstructure:",squash"`
-	common.HTTPConfig            `mapstructure:",squash"`
-	common.FloppyConfig          `mapstructure:",squash"`
-	bootcommand.BootConfig       `mapstructure:",squash"`
-	vboxcommon.ExportConfig      `mapstructure:",squash"`
-	vboxcommon.OutputConfig      `mapstructure:",squash"`
-	vboxcommon.RunConfig         `mapstructure:",squash"`
-	vboxcommon.CommConfig        `mapstructure:",squash"`
-	vboxcommon.ShutdownConfig    `mapstructure:",squash"`
-	vboxcommon.VBoxManageConfig  `mapstructure:",squash"`
-	vboxcommon.VBoxVersionConfig `mapstructure:",squash"`
-
-	// The method by which guest additions are
-	// made available to the guest for installation. Valid options are `upload`,
-	// `attach`, or `disable`. If the mode is `attach` the guest additions ISO will
-	// be attached as a CD device to the virtual machine. If the mode is `upload`
-	// the guest additions ISO will be uploaded to the path specified by
-	// `guest_additions_path`. The default value is `upload`. If `disable` is used,
-	// guest additions won't be downloaded, either.
-	GuestAdditionsMode string `mapstructure:"guest_additions_mode"`
-	// The path on the guest virtual machine
-	//  where the VirtualBox guest additions ISO will be uploaded. By default this
-	//  is `VBoxGuestAdditions.iso` which should upload into the login directory of
-	//  the user. This is a [configuration
-	//  template](/docs/templates/engine) where the `Version`
-	//  variable is replaced with the VirtualBox version.
-	GuestAdditionsPath string `mapstructure:"guest_additions_path"`
-	// The SHA256 checksum of the guest
-	//  additions ISO that will be uploaded to the guest VM. By default the
-	//  checksums will be downloaded from the VirtualBox website, so this only needs
-	//  to be set if you want to be explicit about the checksum.
-	GuestAdditionsSHA256 string `mapstructure:"guest_additions_sha256"`
-	// The URL to the guest additions ISO
-	//  to upload. This can also be a file URL if the ISO is at a local path. By
-	//  default, the VirtualBox builder will attempt to find the guest additions ISO
-	//  on the local file system. If it is not available locally, the builder will
-	//  download the proper guest additions ISO from the internet.
-	GuestAdditionsURL string `mapstructure:"guest_additions_url" required:"false"`
+	common.PackerConfig             `mapstructure:",squash"`
+	commonsteps.HTTPConfig          `mapstructure:",squash"`
+	commonsteps.FloppyConfig        `mapstructure:",squash"`
+	commonsteps.CDConfig            `mapstructure:",squash"`
+	bootcommand.BootConfig          `mapstructure:",squash"`
+	vboxcommon.ExportConfig         `mapstructure:",squash"`
+	vboxcommon.OutputConfig         `mapstructure:",squash"`
+	vboxcommon.RunConfig            `mapstructure:",squash"`
+	vboxcommon.CommConfig           `mapstructure:",squash"`
+	vboxcommon.ShutdownConfig       `mapstructure:",squash"`
+	vboxcommon.VBoxManageConfig     `mapstructure:",squash"`
+	vboxcommon.VBoxVersionConfig    `mapstructure:",squash"`
+	vboxcommon.GuestAdditionsConfig `mapstructure:",squash"`
 	// This is the name of the virtual machine to which the
 	//  builder shall attach.
 	VMName string `mapstructure:"vm_name" required:"true"`
@@ -92,6 +67,7 @@ type Config struct {
 
 func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 	err := config.Decode(c, &config.DecodeOpts{
+		PluginType:         vboxcommon.BuilderId, // "mitchellh.virtualbox"
 		Interpolate:        true,
 		InterpolateContext: &c.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -109,59 +85,33 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 	}
 
 	// Defaults
-	if c.GuestAdditionsMode == "" {
-		c.GuestAdditionsMode = "upload"
-	}
-
-	if c.GuestAdditionsPath == "" {
-		c.GuestAdditionsPath = "VBoxGuestAdditions.iso"
-	}
-
 	if c.PostShutdownDelay == 0 {
 		c.PostShutdownDelay = 2 * time.Second
 	}
 
 	// Prepare the errors
-	var errs *packer.MultiError
-	errs = packer.MultiErrorAppend(errs, c.ExportConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.FloppyConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.HTTPConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.OutputConfig.Prepare(&c.ctx, &c.PackerConfig)...)
-	errs = packer.MultiErrorAppend(errs, c.RunConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.ShutdownConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.CommConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.VBoxManageConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.VBoxVersionConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.BootConfig.Prepare(&c.ctx)...)
+	var errs *packersdk.MultiError
+	errs = packersdk.MultiErrorAppend(errs, c.ExportConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.FloppyConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.CDConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.HTTPConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.OutputConfig.Prepare(&c.ctx, &c.PackerConfig)...)
+	errs = packersdk.MultiErrorAppend(errs, c.RunConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.ShutdownConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.CommConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.VBoxManageConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.VBoxVersionConfig.Prepare(c.CommConfig.Comm.Type)...)
+	errs = packersdk.MultiErrorAppend(errs, c.BootConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.GuestAdditionsConfig.Prepare(c.CommConfig.Comm.Type)...)
+	if c.GuestAdditionsInterface == "" {
+		c.GuestAdditionsInterface = "ide"
+	}
 
 	log.Printf("PostShutdownDelay: %s", c.PostShutdownDelay)
 
 	if c.VMName == "" {
-		errs = packer.MultiErrorAppend(errs,
+		errs = packersdk.MultiErrorAppend(errs,
 			fmt.Errorf("vm_name is required"))
-	}
-
-	validMode := false
-	validModes := []string{
-		vboxcommon.GuestAdditionsModeDisable,
-		vboxcommon.GuestAdditionsModeAttach,
-		vboxcommon.GuestAdditionsModeUpload,
-	}
-
-	for _, mode := range validModes {
-		if c.GuestAdditionsMode == mode {
-			validMode = true
-			break
-		}
-	}
-
-	if !validMode {
-		errs = packer.MultiErrorAppend(errs,
-			fmt.Errorf("guest_additions_mode is invalid. Must be one of: %v", validModes))
-	}
-
-	if c.GuestAdditionsSHA256 != "" {
-		c.GuestAdditionsSHA256 = strings.ToLower(c.GuestAdditionsSHA256)
 	}
 
 	// Warnings
@@ -180,15 +130,15 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 
 	driver, err := vboxcommon.NewDriver()
 	if err != nil {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("Failed creating VirtualBox driver: %s", err))
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("Failed creating VirtualBox driver: %s", err))
 	} else {
 		if c.AttachSnapshot != "" && c.TargetSnapshot != "" && c.AttachSnapshot == c.TargetSnapshot {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("Attach snapshot %s and target snapshot %s cannot be the same", c.AttachSnapshot, c.TargetSnapshot))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("Attach snapshot %s and target snapshot %s cannot be the same", c.AttachSnapshot, c.TargetSnapshot))
 		}
 		snapshotTree, err := driver.LoadSnapshots(c.VMName)
 		log.Printf("")
 		if err != nil {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("Failed to load snapshots for VM %s: %s", c.VMName, err))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("Failed to load snapshots for VM %s: %s", c.VMName, err))
 		} else {
 			log.Printf("Snapshots loaded from VM %s", c.VMName)
 
@@ -200,13 +150,13 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 			if c.AttachSnapshot != "" {
 				log.Printf("Checking configuration attach_snapshot [%s]", c.AttachSnapshot)
 				if nil == snapshotTree {
-					errs = packer.MultiErrorAppend(errs, fmt.Errorf("No snapshots defined on VM %s. Unable to attach to %s", c.VMName, c.AttachSnapshot))
+					errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("No snapshots defined on VM %s. Unable to attach to %s", c.VMName, c.AttachSnapshot))
 				} else {
 					snapshots := snapshotTree.GetSnapshotsByName(c.AttachSnapshot)
 					if 0 >= len(snapshots) {
-						errs = packer.MultiErrorAppend(errs, fmt.Errorf("Snapshot %s does not exist on VM %s", c.AttachSnapshot, c.VMName))
+						errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("Snapshot %s does not exist on VM %s", c.AttachSnapshot, c.VMName))
 					} else if 1 < len(snapshots) {
-						errs = packer.MultiErrorAppend(errs, fmt.Errorf("Multiple Snapshots with name %s exist on VM %s", c.AttachSnapshot, c.VMName))
+						errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("Multiple Snapshots with name %s exist on VM %s", c.AttachSnapshot, c.VMName))
 					} else {
 						attachSnapshot = snapshots[0]
 					}
@@ -218,7 +168,7 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 					log.Printf("Currently no snapshots defined in VM %s", c.VMName)
 				} else {
 					if c.TargetSnapshot == attachSnapshot.Name {
-						errs = packer.MultiErrorAppend(errs, fmt.Errorf("Target snapshot %s cannot be the same as the snapshot to which the builder shall attach: %s", c.TargetSnapshot, attachSnapshot.Name))
+						errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("Target snapshot %s cannot be the same as the snapshot to which the builder shall attach: %s", c.TargetSnapshot, attachSnapshot.Name))
 					} else {
 						snapshots := snapshotTree.GetSnapshotsByName(c.TargetSnapshot)
 						if 0 < len(snapshots) {
@@ -231,9 +181,9 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 								isChild = nil != snapshot.Parent && snapshot.Parent.UUID == attachSnapshot.UUID
 							}
 							if !isChild {
-								errs = packer.MultiErrorAppend(errs, fmt.Errorf("Target snapshot %s already exists and is not a direct child of %s", c.TargetSnapshot, attachSnapshot.Name))
+								errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("Target snapshot %s already exists and is not a direct child of %s", c.TargetSnapshot, attachSnapshot.Name))
 							} else if !c.DeleteTargetSnapshot {
-								errs = packer.MultiErrorAppend(errs, fmt.Errorf("Target snapshot %s already exists as direct child of %s for VM %s. Use force_delete_snapshot = true to overwrite snapshot",
+								errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("Target snapshot %s already exists as direct child of %s for VM %s. Use force_delete_snapshot = true to overwrite snapshot",
 									c.TargetSnapshot,
 									attachSnapshot.Name,
 									c.VMName))

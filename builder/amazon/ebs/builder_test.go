@@ -3,7 +3,7 @@ package ebs
 import (
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func testConfig() map[string]interface{} {
@@ -21,7 +21,7 @@ func testConfig() map[string]interface{} {
 func TestBuilder_ImplementsBuilder(t *testing.T) {
 	var raw interface{}
 	raw = &Builder{}
-	if _, ok := raw.(packer.Builder); !ok {
+	if _, ok := raw.(packersdk.Builder); !ok {
 		t.Fatalf("Builder should be a builder")
 	}
 }
@@ -47,7 +47,6 @@ func TestBuilderPrepare_AMIName(t *testing.T) {
 
 	// Test good
 	config["ami_name"] = "foo"
-	config["skip_region_validation"] = true
 	_, warnings, err := b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
@@ -100,7 +99,6 @@ func TestBuilderPrepare_InvalidShutdownBehavior(t *testing.T) {
 
 	// Test good
 	config["shutdown_behavior"] = "terminate"
-	config["skip_region_validation"] = true
 	_, warnings, err := b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)

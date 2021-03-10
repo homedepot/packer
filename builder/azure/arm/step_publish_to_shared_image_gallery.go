@@ -6,9 +6,9 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-03-01/compute"
 	"github.com/Azure/go-autorest/autorest/date"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/azure/common/constants"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 type StepPublishToSharedImageGallery struct {
@@ -19,7 +19,7 @@ type StepPublishToSharedImageGallery struct {
 	toSIG   func() bool
 }
 
-func NewStepPublishToSharedImageGallery(client *AzureClient, ui packer.Ui, config *Config) *StepPublishToSharedImageGallery {
+func NewStepPublishToSharedImageGallery(client *AzureClient, ui packersdk.Ui, config *Config) *StepPublishToSharedImageGallery {
 	var step = &StepPublishToSharedImageGallery{
 		client: client,
 		say: func(message string) {

@@ -8,10 +8,11 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	awscommon "github.com/hashicorp/packer/builder/amazon/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
 )
 
 // StepCreateVolume creates a new volume from the snapshot of the root
@@ -20,19 +21,21 @@ import (
 // Produces:
 //   volume_id string - The ID of the created volume
 type StepCreateVolume struct {
-	PollingConfig  *awscommon.AWSPollingConfig
-	volumeId       string
-	RootVolumeSize int64
-	RootVolumeType string
-	RootVolumeTags map[string]string
-	Ctx            interpolate.Context
+	PollingConfig         *awscommon.AWSPollingConfig
+	volumeId              string
+	RootVolumeSize        int64
+	RootVolumeType        string
+	RootVolumeTags        map[string]string
+	RootVolumeEncryptBoot config.Trilean
+	RootVolumeKmsKeyId    string
+	Ctx                   interpolate.Context
 }
 
 func (s *StepCreateVolume) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	config := state.Get("config").(*Config)
 	ec2conn := state.Get("ec2").(*ec2.EC2)
 	instance := state.Get("instance").(*ec2.Instance)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	volTags, err := awscommon.TagMap(s.RootVolumeTags).EC2Tags(s.Ctx, *ec2conn.Config.Region, state)
 	if err != nil {
@@ -129,7 +132,7 @@ func (s *StepCreateVolume) Cleanup(state multistep.StateBag) {
 	}
 
 	ec2conn := state.Get("ec2").(*ec2.EC2)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	ui.Say("Deleting the created EBS volume...")
 	_, err := ec2conn.DeleteVolume(&ec2.DeleteVolumeInput{VolumeId: &s.volumeId})
@@ -148,9 +151,19 @@ func (s *StepCreateVolume) buildCreateVolumeInput(az string, rootDevice *ec2.Blo
 		SnapshotId:       rootDevice.Ebs.SnapshotId,
 		VolumeType:       rootDevice.Ebs.VolumeType,
 		Iops:             rootDevice.Ebs.Iops,
+		Encrypted:        rootDevice.Ebs.Encrypted,
+		KmsKeyId:         rootDevice.Ebs.KmsKeyId,
 	}
 	if s.RootVolumeSize > *rootDevice.Ebs.VolumeSize {
 		createVolumeInput.Size = aws.Int64(s.RootVolumeSize)
+	}
+
+	if s.RootVolumeEncryptBoot.True() {
+		createVolumeInput.Encrypted = aws.Bool(true)
+	}
+
+	if s.RootVolumeKmsKeyId != "" {
+		createVolumeInput.KmsKeyId = aws.String(s.RootVolumeKmsKeyId)
 	}
 
 	if s.RootVolumeType == "" || s.RootVolumeType == *rootDevice.Ebs.VolumeType {

@@ -9,8 +9,8 @@ import (
 
 	"github.com/hashicorp/packer/builder/azure/common/constants"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 type StepDeleteAdditionalDisk struct {
@@ -21,7 +21,7 @@ type StepDeleteAdditionalDisk struct {
 	error         func(e error)
 }
 
-func NewStepDeleteAdditionalDisks(client *AzureClient, ui packer.Ui) *StepDeleteAdditionalDisk {
+func NewStepDeleteAdditionalDisks(client *AzureClient, ui packersdk.Ui) *StepDeleteAdditionalDisk {
 	var step = &StepDeleteAdditionalDisk{
 		client: client,
 		say:    func(message string) { ui.Say(message) },
@@ -61,7 +61,11 @@ func (s *StepDeleteAdditionalDisk) deleteManagedDisk(ctx context.Context, resour
 func (s *StepDeleteAdditionalDisk) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	s.say("Deleting the temporary Additional disk ...")
 
-	var dataDisks = state.Get(constants.ArmAdditionalDiskVhds).([]string)
+	var dataDisks []string
+
+	if disks := state.Get(constants.ArmAdditionalDiskVhds); disks != nil {
+		dataDisks = disks.([]string)
+	}
 	var isManagedDisk = state.Get(constants.ArmIsManagedImage).(bool)
 	var isExistingResourceGroup = state.Get(constants.ArmIsExistingResourceGroup).(bool)
 	var resourceGroupName = state.Get(constants.ArmResourceGroupName).(string)

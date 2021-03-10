@@ -9,8 +9,8 @@ import (
 	"io/ioutil"
 
 	"github.com/digitalocean/godo"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 type stepCreateDroplet struct {
@@ -19,7 +19,7 @@ type stepCreateDroplet struct {
 
 func (s *stepCreateDroplet) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	client := state.Get("client").(*godo.Client)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	c := state.Get("config").(*Config)
 	sshKeyId := state.Get("ssh_key_id").(int)
 
@@ -52,6 +52,7 @@ func (s *stepCreateDroplet) Run(ctx context.Context, state multistep.StateBag) m
 		IPv6:              c.IPv6,
 		UserData:          userData,
 		Tags:              c.Tags,
+		VPCUUID:           c.VPCUUID,
 	}
 
 	log.Printf("[DEBUG] Droplet create paramaters: %s", godo.Stringify(dropletCreateReq))
@@ -83,7 +84,7 @@ func (s *stepCreateDroplet) Cleanup(state multistep.StateBag) {
 	}
 
 	client := state.Get("client").(*godo.Client)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	// Destroy the droplet we just created
 	ui.Say("Destroying droplet...")

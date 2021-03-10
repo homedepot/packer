@@ -14,7 +14,7 @@ import (
 
 	"github.com/Azure/go-autorest/autorest/azure"
 	jwt "github.com/dgrijalva/jwt-go"
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func Test_ClientConfig_RequiredParametersSet(t *testing.T) {
@@ -27,6 +27,13 @@ func Test_ClientConfig_RequiredParametersSet(t *testing.T) {
 		{
 			name:    "no client_id, client_secret or subscription_id should enable MSI auth",
 			config:  Config{},
+			wantErr: false,
+		},
+		{
+			name: "use_azure_cli_auth will trigger Azure CLI auth",
+			config: Config{
+				UseAzureCLIAuth: true,
+			},
 			wantErr: false,
 		},
 		{
@@ -89,6 +96,16 @@ func Test_ClientConfig_RequiredParametersSet(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "client_cert_token_timeout should be 5 minutes or more",
+			config: Config{
+				SubscriptionID:          "ok",
+				ClientID:                "ok",
+				ClientCertPath:          "/dev/null",
+				ClientCertExpireTimeout: 1 * time.Minute,
+			},
+			wantErr: true,
+		},
+		{
 			name: "too many client_* values",
 			config: Config{
 				SubscriptionID: "ok",
@@ -119,7 +136,7 @@ func Test_ClientConfig_RequiredParametersSet(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 
-			errs := &packer.MultiError{}
+			errs := &packersdk.MultiError{}
 			tt.config.Validate(errs)
 			if (len(errs.Errors) != 0) != tt.wantErr {
 				t.Errorf("newConfig() error = %v, wantErr %v", errs, tt.wantErr)
@@ -155,6 +172,26 @@ func Test_ClientConfig_DeviceLogin(t *testing.T) {
 	}
 	if kvtoken.RefreshToken == "" {
 		t.Fatal("Expected keyvault token to have non-nil refresh token")
+	}
+}
+
+func Test_ClientConfig_AzureCli(t *testing.T) {
+	// Azure CLI tests skipped unless env 'AZURE_CLI_AUTH' is set, and an active `az login` session has been established
+	getEnvOrSkip(t, "AZURE_CLI_AUTH")
+
+	cfg := Config{
+		UseAzureCLIAuth:  true,
+		cloudEnvironment: getCloud(),
+	}
+	assertValid(t, cfg)
+
+	err := cfg.FillParameters()
+	if err != nil {
+		t.Fatalf("Expected nil err, but got: %v", err)
+	}
+
+	if cfg.authType != authTypeAzureCLI {
+		t.Fatalf("Expected authType to be %q, but got: %q", authTypeAzureCLI, cfg.authType)
 	}
 }
 
@@ -285,7 +322,7 @@ func Test_ClientConfig_CanUseDeviceCode(t *testing.T) {
 }
 
 func assertValid(t *testing.T, cfg Config) {
-	errs := &packer.MultiError{}
+	errs := &packersdk.MultiError{}
 	cfg.Validate(errs)
 	if len(errs.Errors) != 0 {
 		t.Fatal("Expected errs to be empty: ", errs)
@@ -293,7 +330,7 @@ func assertValid(t *testing.T, cfg Config) {
 }
 
 func assertInvalid(t *testing.T, cfg Config) {
-	errs := &packer.MultiError{}
+	errs := &packersdk.MultiError{}
 	cfg.Validate(errs)
 	if len(errs.Errors) == 0 {
 		t.Fatal("Expected errs to be non-empty")

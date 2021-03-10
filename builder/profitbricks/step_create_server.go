@@ -9,21 +9,24 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/profitbricks/profitbricks-sdk-go"
 )
 
 type stepCreateServer struct{}
 
 func (s *stepCreateServer) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	c := state.Get("config").(*Config)
 
 	profitbricks.SetAuth(c.PBUsername, c.PBPassword)
 	profitbricks.SetDepth("5")
-	if sshkey, ok := state.GetOk("publicKey"); ok {
-		c.SSHKey = sshkey.(string)
+	if c.Comm.SSHPublicKey != nil {
+		c.SSHKey = string(c.Comm.SSHPublicKey)
+	} else {
+		ui.Error("No ssh private key set; ssh authentication won't be possible. Please specify your private key in the ssh_private_key_file configuration key.")
+		return multistep.ActionHalt
 	}
 	ui.Say("Creating Virtual Data Center...")
 	img := s.getImageId(c.Image, c)
@@ -158,7 +161,7 @@ func (s *stepCreateServer) Run(ctx context.Context, state multistep.StateBag) mu
 
 func (s *stepCreateServer) Cleanup(state multistep.StateBag) {
 	c := state.Get("config").(*Config)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	ui.Say("Removing Virtual Data Center...")
 
@@ -204,7 +207,7 @@ func (d *stepCreateServer) setPB(username string, password string, url string) {
 
 func (d *stepCreateServer) checkForErrors(instance profitbricks.Resp) error {
 	if instance.StatusCode > 299 {
-		return errors.New(fmt.Sprintf("Error occurred %s", string(instance.Body)))
+		return fmt.Errorf("Error occurred %s", string(instance.Body))
 	}
 	return nil
 }
@@ -240,7 +243,7 @@ func (d *stepCreateServer) getImageId(imageName string, c *Config) string {
 	return ""
 }
 
-func (d *stepCreateServer) getImageAlias(imageAlias string, location string, ui packer.Ui) string {
+func (d *stepCreateServer) getImageAlias(imageAlias string, location string, ui packersdk.Ui) string {
 	if imageAlias == "" {
 		return ""
 	}
@@ -251,7 +254,7 @@ func (d *stepCreateServer) getImageAlias(imageAlias string, location string, ui 
 			if i != "" {
 				alias = i
 			}
-			if alias != "" && strings.ToLower(alias) == strings.ToLower(imageAlias) {
+			if alias != "" && strings.EqualFold(alias, imageAlias) {
 				return alias
 			}
 		}
@@ -261,7 +264,9 @@ func (d *stepCreateServer) getImageAlias(imageAlias string, location string, ui 
 
 func parseErrorMessage(raw string) (toreturn string) {
 	var tmp map[string]interface{}
-	json.Unmarshal([]byte(raw), &tmp)
+	if json.Unmarshal([]byte(raw), &tmp) != nil {
+		return ""
+	}
 
 	for _, v := range tmp["messages"].([]interface{}) {
 		for index, i := range v.(map[string]interface{}) {

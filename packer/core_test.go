@@ -8,8 +8,9 @@ import (
 	"reflect"
 	"testing"
 
-	configHelper "github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/template"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template"
+	configHelper "github.com/hashicorp/packer-plugin-sdk/template/config"
 )
 
 func TestCoreBuildNames(t *testing.T) {
@@ -641,18 +642,18 @@ func TestSensitiveVars(t *testing.T) {
 		// hardcoded
 		{
 			"sensitive-variables.json",
-			map[string]string{"foo": "bar"},
+			map[string]string{"foo": "bar_extra_sensitive_probably_a_password"},
 			[]string{"foo"},
-			"bar",
+			"the foo jumped over the <sensitive>",
 			false,
 		},
 		// interpolated
 		{
 			"sensitive-variables.json",
-			map[string]string{"foo": "bar",
+			map[string]string{"foo": "bar_extra_sensitive_probably_a_password",
 				"bang": "{{ user `foo`}}"},
 			[]string{"bang"},
-			"bar",
+			"the foo jumped over the <sensitive>",
 			false,
 		},
 	}
@@ -679,13 +680,11 @@ func TestSensitiveVars(t *testing.T) {
 		if (err != nil) != tc.Err {
 			t.Fatalf("err: %s\n\n%s", tc.File, err)
 		}
-		filtered := LogSecretFilter.get()
-		if filtered[0] != tc.Expected && len(filtered) != 1 {
+		// Check that filter correctly manipulates strings:
+		filtered := packersdk.LogSecretFilter.FilterString("the foo jumped over the bar_extra_sensitive_probably_a_password")
+		if filtered != tc.Expected {
 			t.Fatalf("not filtering sensitive vars; filtered is %#v", filtered)
 		}
-
-		// clear filter so it doesn't break other tests
-		LogSecretFilter.s = make(map[string]struct{})
 	}
 }
 
@@ -799,12 +798,12 @@ func TestCoreBuild_provRetry(t *testing.T) {
 	config := TestCoreConfig(t)
 	testCoreTemplate(t, config, fixtureDir("build-prov-retry.json"))
 	b := TestBuilder(t, config, "test")
-	pString := new(MockProvisioner)
-	pInt := new(MockProvisioner)
-	config.Components.ProvisionerStore = MapOfProvisioner{
-		"test-string": func() (Provisioner, error) { return pString, nil },
+	pString := new(packersdk.MockProvisioner)
+	pInt := new(packersdk.MockProvisioner)
+	config.Components.PluginConfig.Provisioners = MapOfProvisioner{
+		"test-string": func() (packersdk.Provisioner, error) { return pString, nil },
 		// backwards compatibility
-		"test-integer": func() (Provisioner, error) { return pInt, nil },
+		"test-integer": func() (packersdk.Provisioner, error) { return pInt, nil },
 	}
 	core := TestCore(t, config)
 

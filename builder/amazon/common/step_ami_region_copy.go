@@ -8,9 +8,9 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
 )
 
 type StepAMIRegionCopy struct {
@@ -24,6 +24,7 @@ type StepAMIRegionCopy struct {
 
 	toDelete           string
 	getRegionConn      func(*AccessConfig, string) (ec2iface.EC2API, error)
+	AMISkipCreateImage bool
 	AMISkipBuildRegion bool
 }
 
@@ -62,7 +63,13 @@ func (s *StepAMIRegionCopy) DeduplicateRegions(intermediary bool) {
 }
 
 func (s *StepAMIRegionCopy) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
+
+	if s.AMISkipCreateImage {
+		ui.Say("Skipping AMI region copy...")
+		return multistep.ActionContinue
+	}
+
 	amis := state.Get("amis").(map[string]string)
 	snapshots := state.Get("snapshots").(map[string][]string)
 	intermediary, _ := state.Get("intermediary_image").(bool)
@@ -104,7 +111,7 @@ func (s *StepAMIRegionCopy) Run(ctx context.Context, state multistep.StateBag) m
 
 	var lock sync.Mutex
 	var wg sync.WaitGroup
-	errs := new(packer.MultiError)
+	errs := new(packersdk.MultiError)
 	wg.Add(len(s.Regions))
 	for _, region := range s.Regions {
 		var regKeyID string
@@ -128,7 +135,7 @@ func (s *StepAMIRegionCopy) Run(ctx context.Context, state multistep.StateBag) m
 			amis[region] = id
 			snapshots[region] = snapshotIds
 			if err != nil {
-				errs = packer.MultiErrorAppend(errs, err)
+				errs = packersdk.MultiErrorAppend(errs, err)
 			}
 		}(region)
 	}
@@ -150,7 +157,7 @@ func (s *StepAMIRegionCopy) Run(ctx context.Context, state multistep.StateBag) m
 
 func (s *StepAMIRegionCopy) Cleanup(state multistep.StateBag) {
 	ec2conn := state.Get("ec2").(*ec2.EC2)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	if len(s.toDelete) == 0 {
 		return

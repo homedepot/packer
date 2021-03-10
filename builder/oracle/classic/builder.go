@@ -11,11 +11,11 @@ import (
 	"github.com/hashicorp/go-oracle-terraform/compute"
 	"github.com/hashicorp/go-oracle-terraform/opc"
 	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	ocommon "github.com/hashicorp/packer/builder/oracle/common"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 // BuilderId uniquely identifies the builder
@@ -35,9 +35,9 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 		return nil, nil, err
 	}
 
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 
-	errs = packer.MultiErrorAppend(errs, b.config.PVConfig.Prepare(&b.config.ctx))
+	errs = packersdk.MultiErrorAppend(errs, b.config.PVConfig.Prepare(&b.config.ctx))
 
 	if errs != nil && len(errs.Errors) > 0 {
 		return nil, nil, errs
@@ -45,7 +45,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	return nil, nil, nil
 }
 
-func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (packer.Artifact, error) {
+func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook) (packersdk.Artifact, error) {
 	loggingEnabled := os.Getenv("PACKER_OCI_CLASSIC_LOGGING") != ""
 	httpClient := cleanhttp.DefaultClient()
 	config := &opc.Config{
@@ -106,7 +106,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 				Host:      communicator.CommHost(b.config.Comm.Host(), "instance_ip"),
 				SSHConfig: b.config.Comm.SSHConfigFunc(),
 			},
-			&common.StepProvision{},
+			&commonsteps.StepProvision{},
 			&stepTerminatePVMaster{},
 			&stepSecurity{
 				SecurityListKey: "security_list_builder",
@@ -142,7 +142,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			},
 			&stepCreateImage{},
 			&stepListImages{},
-			&common.StepCleanupTempKeys{
+			&commonsteps.StepCleanupTempKeys{
 				Comm: &b.config.Comm,
 			},
 		}
@@ -169,8 +169,8 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 				Host:      communicator.CommHost(b.config.Comm.Host(), "instance_ip"),
 				SSHConfig: b.config.Comm.SSHConfigFunc(),
 			},
-			&common.StepProvision{},
-			&common.StepCleanupTempKeys{
+			&commonsteps.StepProvision{},
+			&commonsteps.StepCleanupTempKeys{
 				Comm: &b.config.Comm,
 			},
 			&stepSnapshot{},
@@ -179,7 +179,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 	}
 
 	// Run the steps
-	b.runner = common.NewRunner(steps, b.config.PackerConfig, ui)
+	b.runner = commonsteps.NewRunner(steps, b.config.PackerConfig, ui)
 	b.runner.Run(ctx, state)
 
 	// If there was an error, return that

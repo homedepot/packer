@@ -14,16 +14,17 @@ import (
 	"time"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/common/bootcommand"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/bootcommand"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
-// Builder implements packer.Builder and builds the actual VirtualBox
+// Builder implements packersdk.Builder and builds the actual VirtualBox
 // images.
 type Builder struct {
 	config Config
@@ -31,11 +32,11 @@ type Builder struct {
 }
 
 type Config struct {
-	common.PackerConfig    `mapstructure:",squash"`
-	common.HTTPConfig      `mapstructure:",squash"`
-	common.ISOConfig       `mapstructure:",squash"`
-	common.FloppyConfig    `mapstructure:",squash"`
-	bootcommand.BootConfig `mapstructure:",squash"`
+	common.PackerConfig      `mapstructure:",squash"`
+	commonsteps.HTTPConfig   `mapstructure:",squash"`
+	commonsteps.ISOConfig    `mapstructure:",squash"`
+	commonsteps.FloppyConfig `mapstructure:",squash"`
+	bootcommand.BootConfig   `mapstructure:",squash"`
 
 	Comm communicator.Config `mapstructure:",squash"`
 	// The directory to create that will contain your output box. We always
@@ -70,7 +71,7 @@ type Config struct {
 	//  * ebfb681885ddf1234c18094a45bbeafd91467911
 	//  * sha256:ed363350696a726b7932db864dda019bd2017365c9e299627830f06954643f93
 	//  * ed363350696a726b7932db864dda019bd2017365c9e299627830f06954643f93
-	//  * file:http://releases.ubuntu.com/20.04/MD5SUMS
+	//  * file:http://releases.ubuntu.com/20.04/SHA256SUMS
 	//  * file:file://./local/path/file.sum
 	//  * file:./local/path/file.sum
 	//  * none
@@ -90,9 +91,6 @@ type Config struct {
 	// This parameter is required when source_path have more than one provider,
 	// or when using vagrant-cloud post-processor. Defaults to unset.
 	Provider string `mapstructure:"provider" required:"false"`
-
-	Communicator string `mapstructure:"communicator"`
-
 	// Options for the "vagrant init" command
 
 	// What vagrantfile to use
@@ -154,6 +152,7 @@ func (b *Builder) ConfigSpec() hcldec.ObjectSpec { return b.config.FlatMapstruct
 
 func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	err := config.Decode(&b.config, &config.DecodeOpts{
+		PluginType:         BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &b.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -167,7 +166,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	}
 
 	// Accumulate any errors and warnings
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 	warnings := make([]string, 0)
 
 	if b.config.OutputDir == "" {
@@ -179,7 +178,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	}
 
 	if b.config.Comm.Type != "ssh" {
-		errs = packer.MultiErrorAppend(errs,
+		errs = packersdk.MultiErrorAppend(errs,
 			fmt.Errorf(`The Vagrant builder currently only supports the ssh communicator"`))
 	}
 	// The box isn't a namespace like you'd pull from vagrant cloud
@@ -189,11 +188,11 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 
 	if b.config.SourceBox == "" {
 		if b.config.GlobalID == "" {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("source_path is required unless you have set global_id"))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("source_path is required unless you have set global_id"))
 		}
 	} else {
 		if b.config.GlobalID != "" {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("You may either set global_id or source_path but not both"))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("You may either set global_id or source_path but not both"))
 		}
 		// We're about to open up an actual boxfile. If the file is local to the
 		// filesystem, let's make sure it exists before we get too far into the
@@ -204,7 +203,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 			u, err := url.Parse(b.config.SourceBox)
 			if err == nil && (u.Scheme == "" || u.Scheme == "file") {
 				if _, err := os.Stat(b.config.SourceBox); err != nil {
-					errs = packer.MultiErrorAppend(errs,
+					errs = packersdk.MultiErrorAppend(errs,
 						fmt.Errorf("Source box '%s' needs to exist at time of"+
 							" config validation! %v", b.config.SourceBox, err))
 				}
@@ -215,7 +214,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	if b.config.OutputVagrantfile != "" {
 		b.config.OutputVagrantfile, err = filepath.Abs(b.config.OutputVagrantfile)
 		if err != nil {
-			errs = packer.MultiErrorAppend(errs,
+			errs = packersdk.MultiErrorAppend(errs,
 				fmt.Errorf("unable to determine absolute path for output vagrantfile: %s", err))
 		}
 	}
@@ -224,7 +223,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 		for i, rawFile := range b.config.PackageInclude {
 			inclFile, err := filepath.Abs(rawFile)
 			if err != nil {
-				errs = packer.MultiErrorAppend(errs,
+				errs = packersdk.MultiErrorAppend(errs,
 					fmt.Errorf("unable to determine absolute path for file to be included: %s", rawFile))
 			}
 			b.config.PackageInclude[i] = inclFile
@@ -248,7 +247,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 			}
 		}
 		if !matches {
-			errs = packer.MultiErrorAppend(errs,
+			errs = packersdk.MultiErrorAppend(errs,
 				fmt.Errorf(`TeardownMethod must be "halt", "suspend", or "destroy"`))
 		}
 	}
@@ -256,11 +255,11 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	if b.config.SyncedFolder != "" {
 		b.config.SyncedFolder, err = filepath.Abs(b.config.SyncedFolder)
 		if err != nil {
-			errs = packer.MultiErrorAppend(errs,
+			errs = packersdk.MultiErrorAppend(errs,
 				fmt.Errorf("unable to determine absolute path for synced_folder: %s", b.config.SyncedFolder))
 		}
 		if _, err := os.Stat(b.config.SyncedFolder); err != nil {
-			errs = packer.MultiErrorAppend(errs,
+			errs = packersdk.MultiErrorAppend(errs,
 				fmt.Errorf("synced_folder \"%s\" does not exist on the Packer host.", b.config.SyncedFolder))
 		}
 	}
@@ -272,9 +271,9 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	return nil, warnings, nil
 }
 
-// Run executes a Packer build and returns a packer.Artifact representing
+// Run executes a Packer build and returns a packersdk.Artifact representing
 // a VirtualBox appliance.
-func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (packer.Artifact, error) {
+func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook) (packersdk.Artifact, error) {
 	// Create the driver that we'll use to communicate with VirtualBox
 	VagrantCWD, err := filepath.Abs(b.config.OutputDir)
 	if err != nil {
@@ -297,7 +296,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 	steps := []multistep.Step{}
 	// Download if source box isn't from vagrant cloud.
 	if strings.HasSuffix(b.config.SourceBox, ".box") {
-		steps = append(steps, &common.StepDownload{
+		steps = append(steps, &commonsteps.StepDownload{
 			Checksum:    b.config.Checksum,
 			Description: "Box",
 			Extension:   "box",
@@ -306,7 +305,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 		})
 	}
 	steps = append(steps,
-		&common.StepOutputDir{
+		&commonsteps.StepOutputDir{
 			Force: b.config.PackerForce,
 			Path:  b.config.OutputDir,
 		},
@@ -346,7 +345,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			Host:      CommHost(),
 			SSHConfig: b.config.Comm.SSHConfigFunc(),
 		},
-		new(common.StepProvision),
+		new(commonsteps.StepProvision),
 		&StepPackage{
 			SkipPackage: b.config.SkipPackage,
 			Include:     b.config.PackageInclude,
@@ -355,7 +354,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 		})
 
 	// Run the steps.
-	b.runner = common.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
+	b.runner = commonsteps.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
 	b.runner.Run(ctx, state)
 
 	// Report any errors.

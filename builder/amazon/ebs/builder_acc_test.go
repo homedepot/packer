@@ -6,13 +6,14 @@ package ebs
 
 import (
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	builderT "github.com/hashicorp/packer-plugin-sdk/acctest"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/amazon/common"
-	builderT "github.com/hashicorp/packer/helper/builder/testing"
-	"github.com/hashicorp/packer/packer"
 )
 
 func TestBuilderAcc_basic(t *testing.T) {
@@ -88,7 +89,7 @@ func TestBuilderAcc_forceDeleteSnapshot(t *testing.T) {
 }
 
 func checkSnapshotsDeleted(snapshotIds []*string) builderT.TestCheckFunc {
-	return func(artifacts []packer.Artifact) error {
+	return func(artifacts []packersdk.Artifact) error {
 		// Verify the snapshots are gone
 		ec2conn, _ := testEC2Conn()
 		snapshotResp, _ := ec2conn.DescribeSnapshots(
@@ -104,10 +105,10 @@ func checkSnapshotsDeleted(snapshotIds []*string) builderT.TestCheckFunc {
 
 func TestBuilderAcc_amiSharing(t *testing.T) {
 	builderT.Test(t, builderT.TestCase{
-		PreCheck: func() { testAccPreCheck(t) },
+		PreCheck: func() { testAccSharingPreCheck(t) },
 		Builder:  &Builder{},
-		Template: testBuilderAccSharing,
-		Check:    checkAMISharing(2, "932021504756", "all"),
+		Template: buildSharingConfig(os.Getenv("TESTACC_AWS_ACCOUNT_ID")),
+		Check:    checkAMISharing(2, os.Getenv("TESTACC_AWS_ACCOUNT_ID"), "all"),
 	})
 }
 
@@ -121,7 +122,7 @@ func TestBuilderAcc_encryptedBoot(t *testing.T) {
 }
 
 func checkAMISharing(count int, uid, group string) builderT.TestCheckFunc {
-	return func(artifacts []packer.Artifact) error {
+	return func(artifacts []packersdk.Artifact) error {
 		if len(artifacts) > 1 {
 			return fmt.Errorf("more than 1 artifact")
 		}
@@ -177,7 +178,7 @@ func checkAMISharing(count int, uid, group string) builderT.TestCheckFunc {
 }
 
 func checkRegionCopy(regions []string) builderT.TestCheckFunc {
-	return func(artifacts []packer.Artifact) error {
+	return func(artifacts []packersdk.Artifact) error {
 		if len(artifacts) > 1 {
 			return fmt.Errorf("more than 1 artifact")
 		}
@@ -210,7 +211,7 @@ func checkRegionCopy(regions []string) builderT.TestCheckFunc {
 }
 
 func checkBootEncrypted() builderT.TestCheckFunc {
-	return func(artifacts []packer.Artifact) error {
+	return func(artifacts []packersdk.Artifact) error {
 
 		// Get the actual *Artifact pointer so we can access the AMIs directly
 		artifactRaw := artifacts[0]
@@ -245,7 +246,21 @@ func checkBootEncrypted() builderT.TestCheckFunc {
 	}
 }
 
+func TestBuilderAcc_SessionManagerInterface(t *testing.T) {
+	builderT.Test(t, builderT.TestCase{
+		PreCheck: func() { testAccPreCheck(t) },
+		Builder:  &Builder{},
+		Template: testBuilderAccSessionManagerInterface,
+	})
+}
+
 func testAccPreCheck(t *testing.T) {
+}
+
+func testAccSharingPreCheck(t *testing.T) {
+	if v := os.Getenv("TESTACC_AWS_ACCOUNT_ID"); v == "" {
+		t.Fatal(fmt.Sprintf("TESTACC_AWS_ACCOUNT_ID must be set for acceptance tests"))
+	}
 }
 
 func testEC2Conn() (*ec2.EC2, error) {
@@ -314,7 +329,6 @@ const testBuilderAccForceDeleteSnapshot = `
 }
 `
 
-// share with catsby
 const testBuilderAccSharing = `
 {
 	"builders": [{
@@ -324,7 +338,7 @@ const testBuilderAccSharing = `
 		"source_ami": "ami-76b2a71e",
 		"ssh_username": "ubuntu",
 		"ami_name": "packer-test {{timestamp}}",
-		"ami_users":["932021504756"],
+		"ami_users":["%s"],
 		"ami_groups":["all"]
 	}]
 }
@@ -344,10 +358,39 @@ const testBuilderAccEncrypted = `
 }
 `
 
+const testBuilderAccSessionManagerInterface = `
+{
+	"builders": [{
+		"type": "test",
+		"region": "us-east-1",
+		"instance_type": "m3.medium",
+		"source_ami_filter": {
+				"filters": {
+						"virtualization-type": "hvm",
+						"name": "ubuntu/images/*ubuntu-xenial-16.04-amd64-server-*",
+						"root-device-type": "ebs"
+				},
+				"owners": [
+						"099720109477"
+				],
+				"most_recent": true
+		},
+		"ssh_username": "ubuntu",
+		"ssh_interface": "session_manager",
+		"iam_instance_profile": "SSMInstanceProfile",
+		"ami_name": "packer-ssm-test-{{timestamp}}"
+	}]
+}
+`
+
 func buildForceDeregisterConfig(val, name string) string {
 	return fmt.Sprintf(testBuilderAccForceDeregister, val, name)
 }
 
 func buildForceDeleteSnapshotConfig(val, name string) string {
 	return fmt.Sprintf(testBuilderAccForceDeleteSnapshot, val, val, name)
+}
+
+func buildSharingConfig(val string) string {
+	return fmt.Sprintf(testBuilderAccSharing, val)
 }

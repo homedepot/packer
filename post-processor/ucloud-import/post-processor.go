@@ -12,12 +12,12 @@ import (
 	"time"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	ucloudcommon "github.com/hashicorp/packer/builder/ucloud/common"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/common/retry"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
 	"github.com/ucloud/ucloud-sdk-go/services/ufile"
 	"github.com/ucloud/ucloud-sdk-go/services/uhost"
 	"github.com/ucloud/ucloud-sdk-go/ucloud"
@@ -49,7 +49,7 @@ type Config struct {
 	UFileBucket string `mapstructure:"ufile_bucket_name" required:"true"`
 	// The name of the object key in
 	//  `ufile_bucket_name` where the RAW, VHD, VMDK, or qcow2 file will be copied
-	//  to import. This is a [template engine](/docs/templates/engine).
+	//  to import. This is a [template engine](/docs/templates/legacy_json_templates/engine).
 	//  Therefore, you may use user variables and template functions in this field.
 	UFileKey string `mapstructure:"ufile_key_name" required:"false"`
 	// Whether we should skip removing the RAW, VHD, VMDK, or qcow2 file uploaded to
@@ -83,6 +83,7 @@ func (p *PostProcessor) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMap
 
 func (p *PostProcessor) Configure(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -104,16 +105,16 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		p.config.WaitImageReadyTimeout = ucloudcommon.DefaultCreateImageTimeout
 	}
 
-	errs := new(packer.MultiError)
+	errs := new(packersdk.MultiError)
 
 	// Check and render ufile_key_name
 	if err = interpolate.Validate(p.config.UFileKey, &p.config.ctx); err != nil {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("Error parsing ufile_key_name template: %s", err))
 	}
 
 	// Check we have ucloud access variables defined somewhere
-	errs = packer.MultiErrorAppend(errs, p.config.AccessConfig.Prepare(&p.config.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, p.config.AccessConfig.Prepare(&p.config.ctx)...)
 
 	// define all our required parameters
 	templates := map[string]*string{
@@ -126,20 +127,20 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	// Check out required params are defined
 	for key, ptr := range templates {
 		if *ptr == "" {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("%s must be set", key))
 		}
 	}
 
 	imageName := p.config.ImageName
 	if !ucloudcommon.ImageNamePattern.MatchString(imageName) {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("expected %q to be 1-63 characters and only support chinese, english, numbers, '-_,.:[]', got %q", "image_name", imageName))
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("expected %q to be 1-63 characters and only support chinese, english, numbers, '-_,.:[]', got %q", "image_name", imageName))
 	}
 
 	switch p.config.Format {
 	case ImageFileFormatVHD, ImageFileFormatRAW, ImageFileFormatVMDK, ImageFileFormatQCOW2:
 	default:
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("expected %q only be one of 'raw', 'vhd', 'vmdk', or 'qcow2', got %q", "format", p.config.Format))
 	}
 
@@ -148,12 +149,12 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		return errs
 	}
 
-	packer.LogSecretFilter.Set(p.config.PublicKey, p.config.PrivateKey)
+	packersdk.LogSecretFilter.Set(p.config.PublicKey, p.config.PrivateKey)
 	log.Println(p.config)
 	return nil
 }
 
-func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, bool, error) {
+func (p *PostProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, artifact packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
 	var err error
 
 	generatedData := artifact.State("generated_data")

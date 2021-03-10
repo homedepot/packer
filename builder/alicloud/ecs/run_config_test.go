@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/hashicorp/packer/helper/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
 )
 
 func testConfig() *RunConfig {

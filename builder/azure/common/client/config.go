@@ -11,7 +11,7 @@ import (
 	"github.com/Azure/go-autorest/autorest/adal"
 	"github.com/Azure/go-autorest/autorest/azure"
 	jwt "github.com/dgrijalva/jwt-go"
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // Config allows for various ways to authenticate Azure clients.
@@ -39,6 +39,8 @@ type Config struct {
 	// The path to a pem-encoded certificate that will be used to authenticate
 	// as the specified AAD SP.
 	ClientCertPath string `mapstructure:"client_cert_path"`
+	// The timeout for the JWT Token when using a [client certificate](#client_cert_path). Defaults to 1 hour.
+	ClientCertExpireTimeout time.Duration `mapstructure:"client_cert_token_timeout" required:"false"`
 	// A JWT bearer token for client auth (RFC 7523, Sec. 2.2) that will be used
 	// to authenticate the AAD SP. Provides more control over token the expiration
 	// when using certificate authentication than when using `client_cert_path`.
@@ -54,6 +56,14 @@ type Config struct {
 	SubscriptionID string `mapstructure:"subscription_id"`
 
 	authType string
+
+	// Flag to use Azure CLI authentication. Defaults to false.
+	// CLI auth will use the information from an active `az login` session to connect to Azure and set the subscription id and tenant id associated to the signed in account.
+	// If enabled, it will use the authentication provided by the `az` CLI.
+	// Azure CLI authentication will use the credential marked as `isDefault` and can be verified using `az account show`.
+	// Works with normal authentication (`az login`) and service principals (`az login --service-principal --username APP_ID --password PASSWORD --tenant TENANT_ID`).
+	// Ignores all other configurations if enabled.
+	UseAzureCLIAuth bool `mapstructure:"use_azure_cli_auth" required:"false"`
 }
 
 const (
@@ -62,6 +72,7 @@ const (
 	authTypeClientSecret    = "ClientSecret"
 	authTypeClientCert      = "ClientCertificate"
 	authTypeClientBearerJWT = "ClientBearerJWT"
+	authTypeAzureCLI        = "AzureCLI"
 )
 
 const DefaultCloudEnvironmentName = "Public"
@@ -111,7 +122,8 @@ func (c *Config) setCloudEnvironment() error {
 	return err
 }
 
-func (c Config) Validate(errs *packer.MultiError) {
+//nolint:ineffassign //this triggers a false positive because errs is passed by reference
+func (c Config) Validate(errs *packersdk.MultiError) {
 	/////////////////////////////////////////////
 	// Authentication via OAUTH
 
@@ -123,6 +135,10 @@ func (c Config) Validate(errs *packer.MultiError) {
 	// Device login is not enabled for Windows because the WinRM certificate is
 	// readable by the ObjectID of the App.  There may be another way to handle
 	// this case, but I am not currently aware of it - send feedback.
+
+	if c.UseCLI() {
+		return
+	}
 
 	if c.UseMSI() {
 		return
@@ -147,7 +163,10 @@ func (c Config) Validate(errs *packer.MultiError) {
 		// Service principal using certificate
 
 		if _, err := os.Stat(c.ClientCertPath); err != nil {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("client_cert_path is not an accessible file: %v", err))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("client_cert_path is not an accessible file: %v", err))
+		}
+		if c.ClientCertExpireTimeout < 5*time.Minute {
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("client_cert_token_timeout will expire within 5 minutes, please set a value greater than 5 minutes"))
 		}
 		return
 	}
@@ -163,20 +182,20 @@ func (c Config) Validate(errs *packer.MultiError) {
 		claims := jwt.StandardClaims{}
 		token, _, err := p.ParseUnverified(c.ClientJWT, &claims)
 		if err != nil {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("client_jwt is not a JWT: %v", err))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("client_jwt is not a JWT: %v", err))
 		} else {
 			if claims.ExpiresAt < time.Now().Add(5*time.Minute).Unix() {
-				errs = packer.MultiErrorAppend(errs, fmt.Errorf("client_jwt will expire within 5 minutes, please use a JWT that is valid for at least 5 minutes"))
+				errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("client_jwt will expire within 5 minutes, please use a JWT that is valid for at least 5 minutes"))
 			}
 			if t, ok := token.Header["x5t"]; !ok || t == "" {
-				errs = packer.MultiErrorAppend(errs, fmt.Errorf("client_jwt is missing the x5t header value, which is required for bearer JWT client authentication to Azure"))
+				errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("client_jwt is missing the x5t header value, which is required for bearer JWT client authentication to Azure"))
 			}
 		}
 
 		return
 	}
 
-	errs = packer.MultiErrorAppend(errs, fmt.Errorf("No valid set of authentication values specified:\n"+
+	errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("No valid set of authentication values specified:\n"+
 		"  to use the Managed Identity of the current machine, do not specify any of the fields below\n"+
 		"  to use interactive user authentication, specify only subscription_id\n"+
 		"  to use an Azure Active Directory service principal, specify either:\n"+
@@ -191,6 +210,10 @@ func (c Config) useDeviceLogin() bool {
 		c.ClientSecret == "" &&
 		c.ClientJWT == "" &&
 		c.ClientCertPath == ""
+}
+
+func (c Config) UseCLI() bool {
+	return c.UseAzureCLIAuth == true
 }
 
 func (c Config) UseMSI() bool {
@@ -230,6 +253,9 @@ func (c Config) GetServicePrincipalToken(
 	case authTypeDeviceLogin:
 		say("Getting tokens using device flow")
 		auth = NewDeviceFlowOAuthTokenProvider(*c.cloudEnvironment, say, c.TenantID)
+	case authTypeAzureCLI:
+		say("Getting tokens using Azure CLI")
+		auth = NewCliOAuthTokenProvider(*c.cloudEnvironment, say, c.TenantID)
 	case authTypeMSI:
 		say("Getting tokens using Managed Identity for Azure")
 		auth = NewMSIOAuthTokenProvider(*c.cloudEnvironment)
@@ -238,7 +264,7 @@ func (c Config) GetServicePrincipalToken(
 		auth = NewSecretOAuthTokenProvider(*c.cloudEnvironment, c.ClientID, c.ClientSecret, c.TenantID)
 	case authTypeClientCert:
 		say("Getting tokens using client certificate")
-		auth, err = NewCertOAuthTokenProvider(*c.cloudEnvironment, c.ClientID, c.ClientCertPath, c.TenantID)
+		auth, err = NewCertOAuthTokenProvider(*c.cloudEnvironment, c.ClientID, c.ClientCertPath, c.TenantID, c.ClientCertExpireTimeout)
 		if err != nil {
 			return nil, err
 		}
@@ -268,6 +294,8 @@ func (c *Config) FillParameters() error {
 	if c.authType == "" {
 		if c.useDeviceLogin() {
 			c.authType = authTypeDeviceLogin
+		} else if c.UseCLI() {
+			c.authType = authTypeAzureCLI
 		} else if c.UseMSI() {
 			c.authType = authTypeMSI
 		} else if c.ClientSecret != "" {
@@ -295,12 +323,26 @@ func (c *Config) FillParameters() error {
 		}
 	}
 
+	if c.authType == authTypeAzureCLI {
+		tenantID, subscriptionID, err := getIDsFromAzureCLI()
+		if err != nil {
+			return fmt.Errorf("error fetching tenantID and subscriptionID from Azure CLI (are you logged on using `az login`?): %v", err)
+		}
+
+		c.TenantID = tenantID
+		c.SubscriptionID = subscriptionID
+	}
+
 	if c.TenantID == "" {
 		tenantID, err := findTenantID(*c.cloudEnvironment, c.SubscriptionID)
 		if err != nil {
 			return err
 		}
 		c.TenantID = tenantID
+	}
+
+	if c.ClientCertExpireTimeout == 0 {
+		c.ClientCertExpireTimeout = time.Hour
 	}
 
 	return nil

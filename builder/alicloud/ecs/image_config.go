@@ -7,11 +7,12 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/hashicorp/packer/hcl2template"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
+// The "AlicloudDiskDevice" object us used for the `ECSSystemDiskMapping` and
+// `ECSImagesDiskMappings` options, and contains the following fields:
 type AlicloudDiskDevice struct {
 	// The value of disk name is blank by default. [2,
 	// 128] English or Chinese characters, must begin with an
@@ -19,8 +20,7 @@ type AlicloudDiskDevice struct {
 	// ., _ and -. The disk name will appear on the console. It cannot
 	// begin with `http://` or `https://`.
 	DiskName string `mapstructure:"disk_name" required:"false"`
-	// Category of the system disk. Optional values
-	// are:
+	// Category of the system disk. Optional values are:
 	//     -   cloud - general cloud disk
 	//     -   cloud_efficiency - efficiency cloud disk
 	//     -   cloud_ssd - cloud SSD
@@ -32,6 +32,8 @@ type AlicloudDiskDevice struct {
 	// Snapshots are used to create the data
 	// disk After this parameter is specified, Size is ignored. The actual
 	// size of the created disk is the size of the specified snapshot.
+	// This field is only used in the ECSImagesDiskMappings option, not
+	// the ECSSystemDiskMapping option.
 	SnapshotId string `mapstructure:"disk_snapshot_id" required:"false"`
 	// The value of disk description is blank by
 	// default. [2, 256] characters. The disk description will appear on the
@@ -44,94 +46,51 @@ type AlicloudDiskDevice struct {
 	// such as /dev/xvdb It is null unless the Status is In_use.
 	Device string `mapstructure:"disk_device" required:"false"`
 	// Whether or not to encrypt the data disk.
-	// If this option is set to true, the data disk will be encryped and corresponding snapshot in the target image will also be encrypted. By
+	// If this option is set to true, the data disk will be encryped and
+	// corresponding snapshot in the target image will also be encrypted. By
 	// default, if this is an extra data disk, Packer will not encrypt the
 	// data disk. Otherwise, Packer will keep the encryption setting to what
-	// it was in the source image. Please refer to Introduction of ECS disk encryption
-	// for more details.
+	// it was in the source image. Please refer to Introduction of ECS disk
+	// encryption for more details.
 	Encrypted config.Trilean `mapstructure:"disk_encrypted" required:"false"`
 }
 
+// The "AlicloudDiskDevices" object is used to define disk mappings for your
+// instance.
 type AlicloudDiskDevices struct {
-	// Image disk mapping for system
-	// disk.
-	// -   `disk_category` (string) - Category of the system disk. Optional values
-	//     are:
-	//         -   `cloud` - general cloud disk
-	//         -   `cloud_efficiency` - efficiency cloud disk
-	//         -   `cloud_ssd` - cloud SSD
+	// Image disk mapping for the system disk.
+	// See the [disk device configuration](#disk-devices-configuration) section
+	// for more information on options.
+	// Usage example:
 	//
-	//      For phased-out instance types and non-I/O optimized instances, the
-	//      default value is cloud. Otherwise, the default value is
-	//      cloud\_efficiency.
-	//
-	// -   `disk_description` (string) - The value of disk description is blank by
-	//     default. \[2, 256\] characters. The disk description will appear on the
-	//     console. It cannot begin with `http://` or `https://`.
-	//
-	// -   `disk_name` (string) - The value of disk name is blank by default. \[2,
-	//     128\] English or Chinese characters, must begin with an
-	//     uppercase/lowercase letter or Chinese character. Can contain numbers,
-	//     `.`, `_` and `-`. The disk name will appear on the console. It cannot
-	//     begin with `http://` or `https://`.
-	//
-	// -   `disk_size` (number) - Size of the system disk, measured in GiB. Value
-	//     range: \[20, 500\]. The specified value must be equal to or greater
-	//     than max{20, ImageSize}. Default value: max{40, ImageSize}.
-	//
+	// ```json
+	// "builders": [{
+	//   "type":"alicloud-ecs",
+	//   "system_disk_mapping": {
+	//     "disk_size": 50,
+	//     "disk_name": "mydisk"
+	//   },
+	//   ...
+	// }
+	// ```
 	ECSSystemDiskMapping AlicloudDiskDevice `mapstructure:"system_disk_mapping" required:"false"`
-	// Add one or more data
-	// disks to the image.
+	// Add one or more data disks to the image.
+	// See the [disk device configuration](#disk-devices-configuration) section
+	// for more information on options.
+	// Usage example:
 	//
-	// -   `disk_category` (string) - Category of the data disk. Optional values
-	//     are:
-	//     -   `cloud` - general cloud disk
-	//     -   `cloud_efficiency` - efficiency cloud disk
-	//     -   `cloud_ssd` - cloud SSD
-	//
-	//     Default value: cloud.
-	//
-	// -   `disk_delete_with_instance` (boolean) - Whether or not the disk is
-	//     released along with the instance:
-	//     -   True indicates that when the instance is released, this disk will
-	//         be released with it
-	//     -   False indicates that when the instance is released, this disk will
-	//         be retained.
-	// -   `disk_description` (string) - The value of disk description is blank by
-	//     default. \[2, 256\] characters. The disk description will appear on the
-	//     console. It cannot begin with `http://` or `https://`.
-	//
-	// -   `disk_device` (string) - Device information of the related instance:
-	//     such as `/dev/xvdb` It is null unless the Status is In\_use.
-	//
-	// -   `disk_name` (string) - The value of disk name is blank by default. \[2,
-	//     128\] English or Chinese characters, must begin with an
-	//     uppercase/lowercase letter or Chinese character. Can contain numbers,
-	//     `.`, `_` and `-`. The disk name will appear on the console. It cannot
-	//     begin with `http://` or `https://`.
-	//
-	// -   `disk_size` (number) - Size of the data disk, in GB, values range:
-	//     -   `cloud` - 5 \~ 2000
-	//     -   `cloud_efficiency` - 20 \~ 2048
-	//     -   `cloud_ssd` - 20 \~ 2048
-	//
-	//     The value should be equal to or greater than the size of the specific
-	//     SnapshotId.
-	//
-	// -   `disk_snapshot_id` (string) - Snapshots are used to create the data
-	//     disk After this parameter is specified, Size is ignored. The actual
-	//     size of the created disk is the size of the specified snapshot.
-	//
-	//     Snapshots from on or before July 15, 2013 cannot be used to create a
-	//     disk.
-	//
-	// -   `disk_encrypted` (boolean) - Whether or not to encrypt the data disk.
-	//     If this option is set to true, the data disk will be encryped and corresponding snapshot in the target image will also be encrypted. By
-	//     default, if this is an extra data disk, Packer will not encrypt the
-	//     data disk. Otherwise, Packer will keep the encryption setting to what
-	//     it was in the source image. Please refer to Introduction of [ECS disk encryption](https://www.alibabacloud.com/help/doc-detail/59643.htm)
-	//     for more details.
-	//
+	// ```json
+	//  "builders": [{
+	//    "type":"alicloud-ecs",
+	//    "image_disk_mappings": [
+	//      {
+	//        "disk_snapshot_id": "someid",
+	//        "disk_device": "dev/xvdb"
+	//      }
+	//    ],
+	//    ...
+	//  }
+	//  ```
 	ECSImagesDiskMappings []AlicloudDiskDevice `mapstructure:"image_disk_mappings" required:"false"`
 }
 
@@ -194,9 +153,9 @@ type AlicloudImageConfig struct {
 	AlicloudImageTags map[string]string `mapstructure:"tags" required:"false"`
 	// Same as [`tags`](#tags) but defined as a singular repeatable block
 	// containing a `key` and a `value` field. In HCL2 mode the
-	// [`dynamic_block`](/docs/configuration/from-1.5/expressions#dynamic-blocks)
+	// [`dynamic_block`](/docs/templates/hcl_templates/expressions#dynamic-blocks)
 	// will allow you to create those programatically.
-	AlicloudImageTag    hcl2template.KeyValues `mapstructure:"tag" required:"false"`
+	AlicloudImageTag    config.KeyValues `mapstructure:"tag" required:"false"`
 	AlicloudDiskDevices `mapstructure:",squash"`
 }
 

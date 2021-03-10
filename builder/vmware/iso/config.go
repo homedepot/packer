@@ -9,20 +9,22 @@ import (
 	"os"
 	"strings"
 
+	"github.com/hashicorp/packer-plugin-sdk/bootcommand"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/shutdowncommand"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	vmwcommon "github.com/hashicorp/packer/builder/vmware/common"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/common/bootcommand"
-	"github.com/hashicorp/packer/common/shutdowncommand"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
 )
 
 type Config struct {
 	common.PackerConfig            `mapstructure:",squash"`
-	common.HTTPConfig              `mapstructure:",squash"`
-	common.ISOConfig               `mapstructure:",squash"`
-	common.FloppyConfig            `mapstructure:",squash"`
+	commonsteps.HTTPConfig         `mapstructure:",squash"`
+	commonsteps.ISOConfig          `mapstructure:",squash"`
+	commonsteps.FloppyConfig       `mapstructure:",squash"`
+	commonsteps.CDConfig           `mapstructure:",squash"`
 	bootcommand.VNCConfig          `mapstructure:",squash"`
 	vmwcommon.DriverConfig         `mapstructure:",squash"`
 	vmwcommon.HWConfig             `mapstructure:",squash"`
@@ -64,7 +66,7 @@ type Config struct {
 	VMName string `mapstructure:"vm_name" required:"false"`
 
 	VMXDiskTemplatePath string `mapstructure:"vmx_disk_template_path"`
-	// Path to a [configuration template](/docs/templates/engine) that
+	// Path to a [configuration template](/docs/templates/legacy_json_templates/engine) that
 	// defines the contents of the virtual machine VMX file for VMware. The
 	// engine has access to the template variables `{{ .DiskNumber }}` and
 	// `{{ .DiskName }}`.
@@ -93,26 +95,28 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 	}
 
 	// Accumulate any errors and warnings
-	var errs *packer.MultiError
-	warnings := make([]string, 0)
+	var warnings []string
+	var errs *packersdk.MultiError
 
+	runConfigWarnings, runConfigErrs := c.RunConfig.Prepare(&c.ctx, &c.DriverConfig)
+	warnings = append(warnings, runConfigWarnings...)
+	errs = packersdk.MultiErrorAppend(errs, runConfigErrs...)
 	isoWarnings, isoErrs := c.ISOConfig.Prepare(&c.ctx)
 	warnings = append(warnings, isoWarnings...)
-	errs = packer.MultiErrorAppend(errs, isoErrs...)
-	errs = packer.MultiErrorAppend(errs, c.HTTPConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.HWConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.DriverConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs,
-		c.OutputConfig.Prepare(&c.ctx, &c.PackerConfig)...)
-	errs = packer.MultiErrorAppend(errs, c.RunConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.ShutdownConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.SSHConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.ToolsConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.VMXConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.FloppyConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.VNCConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.ExportConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.DiskConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, isoErrs...)
+	errs = packersdk.MultiErrorAppend(errs, c.HTTPConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.HWConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.OutputConfig.Prepare(&c.ctx, &c.PackerConfig)...)
+	errs = packersdk.MultiErrorAppend(errs, c.DriverConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.ShutdownConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.SSHConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.ToolsConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.CDConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.VNCConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.VMXConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.FloppyConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.ExportConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.DiskConfig.Prepare(&c.ctx)...)
 
 	if c.DiskSize == 0 {
 		c.DiskSize = 40000
@@ -130,7 +134,7 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 
 	if c.RemoteType == "esx5" {
 		if c.DiskTypeId != "thin" && !c.SkipCompaction {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("skip_compaction must be 'true' for disk_type_id: %s", c.DiskTypeId))
 		}
 	}
@@ -149,7 +153,7 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 
 	if c.VMXTemplatePath != "" {
 		if err := c.validateVMXTemplatePath(); err != nil {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("vmx_template_path is invalid: %s", err))
 		}
 	} else {
@@ -163,37 +167,39 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 		c.HWConfig.Network = "nat"
 	}
 
-	// Remote configuration validation
-	if c.RemoteType != "" {
-		if c.RemoteHost == "" {
-			errs = packer.MultiErrorAppend(errs,
-				fmt.Errorf("remote_host must be specified"))
-		}
-
-		if c.RemoteType != "esx5" {
-			errs = packer.MultiErrorAppend(errs,
-				fmt.Errorf("Only 'esx5' value is accepted for remote_type"))
-		}
-	}
-
 	if c.Format == "" {
-		if c.RemoteType != "esx5" {
+		if c.RemoteType == "" {
 			c.Format = "vmx"
 		} else {
 			c.Format = "ovf"
 		}
 	}
 
-	if c.RemoteType != "esx5" && c.Format == "vmx" {
-		// if we're building locally and want a vmx, there's nothing to export.
-		// Set skip export flag here to keep the export step from attempting
-		// an unneded export
-		c.SkipExport = true
+	if c.RemoteType == "" {
+		if c.Format == "vmx" {
+			// if we're building locally and want a vmx, there's nothing to export.
+			// Set skip export flag here to keep the export step from attempting
+			// an unneded export
+			c.SkipExport = true
+		}
+		if c.Headless && c.DisableVNC {
+			warnings = append(warnings,
+				"Headless mode uses VNC to retrieve output. Since VNC has been disabled,\n"+
+					"you won't be able to see any output.")
+		}
 	}
 
 	err = c.DriverConfig.Validate(c.SkipExport)
 	if err != nil {
-		errs = packer.MultiErrorAppend(errs, err)
+		errs = packersdk.MultiErrorAppend(errs, err)
+	}
+
+	if c.CdromAdapterType != "" {
+		c.CdromAdapterType = strings.ToLower(c.CdromAdapterType)
+		if c.CdromAdapterType != "ide" && c.CdromAdapterType != "sata" && c.CdromAdapterType != "scsi" {
+			errs = packersdk.MultiErrorAppend(errs,
+				fmt.Errorf("cdrom_adapter_type must be one of ide, sata, or scsi"))
+		}
 	}
 
 	// Warnings
@@ -201,12 +207,6 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 		warnings = append(warnings,
 			"A shutdown_command was not specified. Without a shutdown command, Packer\n"+
 				"will forcibly halt the virtual machine, which may result in data loss.")
-	}
-
-	if c.Headless && c.DisableVNC {
-		warnings = append(warnings,
-			"Headless mode uses VNC to retrieve output. Since VNC has been disabled,\n"+
-				"you won't be able to see any output.")
 	}
 
 	if errs != nil && len(errs.Errors) > 0 {

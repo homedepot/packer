@@ -1,5 +1,5 @@
 //go:generate struct-markdown
-//go:generate mapstructure-to-hcl2 -type AmiFilterOptions,SecurityGroupFilterOptions,SubnetFilterOptions,VpcFilterOptions,PolicyDocument,Statement
+//go:generate mapstructure-to-hcl2 -type AmiFilterOptions,SecurityGroupFilterOptions,SubnetFilterOptions,VpcFilterOptions,PolicyDocument,Statement,MetadataOptions
 
 package common
 
@@ -11,45 +11,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hashicorp/packer/common/uuid"
-	"github.com/hashicorp/packer/hcl2template"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/uuid"
 )
 
 var reShutdownBehavior = regexp.MustCompile("^(stop|terminate)$")
 
-type AmiFilterOptions struct {
-	hcl2template.KeyValueFilter `mapstructure:",squash"`
-	Owners                      []string
-	MostRecent                  bool `mapstructure:"most_recent"`
-}
-
-func (d *AmiFilterOptions) GetOwners() []*string {
-	res := make([]*string, 0, len(d.Owners))
-	for _, owner := range d.Owners {
-		i := owner
-		res = append(res, &i)
-	}
-	return res
-}
-
-func (d *AmiFilterOptions) Empty() bool {
-	return len(d.Owners) == 0 && d.KeyValueFilter.Empty()
-}
-
-func (d *AmiFilterOptions) NoOwner() bool {
-	return len(d.Owners) == 0
-}
-
 type SubnetFilterOptions struct {
-	hcl2template.NameValueFilter `mapstructure:",squash"`
-	MostFree                     bool `mapstructure:"most_free"`
-	Random                       bool `mapstructure:"random"`
+	config.NameValueFilter `mapstructure:",squash"`
+	MostFree               bool `mapstructure:"most_free"`
+	Random                 bool `mapstructure:"random"`
 }
 
 type VpcFilterOptions struct {
-	hcl2template.NameValueFilter `mapstructure:",squash"`
+	config.NameValueFilter `mapstructure:",squash"`
 }
 
 type Statement struct {
@@ -64,7 +41,21 @@ type PolicyDocument struct {
 }
 
 type SecurityGroupFilterOptions struct {
-	hcl2template.NameValueFilter `mapstructure:",squash"`
+	config.NameValueFilter `mapstructure:",squash"`
+}
+
+// Configures the metadata options.
+// See [Configure IMDS](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html) for details.
+type MetadataOptions struct {
+	// A string to enable or disble the IMDS endpoint for an instance. Defaults to enabled.
+	// Accepts either "enabled" or "disabled"
+	HttpEndpoint string `mapstructure:"http_endpoint" required:"false"`
+	// A string to either set the use of IMDSv2 for the instance to optional or required. Defaults to "optional".
+	// Accepts either "optional" or "required"
+	HttpTokens string `mapstructure:"http_tokens" required:"false"`
+	// A numerical value to set an upper limit for the amount of hops allowed when communicating with IMDS endpoints.
+	// Defaults to 1.
+	HttpPutResponseHopLimit int64 `mapstructure:"http_put_response_hop_limit" required:"false"`
 }
 
 // RunConfig contains configuration for running an instance from a source
@@ -85,7 +76,7 @@ type RunConfig struct {
 	BlockDurationMinutes int64 `mapstructure:"block_duration_minutes" required:"false"`
 	// Packer normally stops the build instance after all provisioners have
 	// run. For Windows instances, it is sometimes desirable to [run
-	// Sysprep](http://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/ami-create-standard.html)
+	// Sysprep](https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/Creating_EBSbacked_WinAMI.html)
 	// which will stop the instance for you. If this is set to `true`, Packer
 	// *will not* stop the instance but will assume that you will send the stop
 	// signal yourself through your final provisioner. You can do this with a
@@ -141,8 +132,21 @@ type RunConfig struct {
 	// Whether or not to check if the IAM instance profile exists. Defaults to false
 	SkipProfileValidation bool `mapstructure:"skip_profile_validation" required:"false"`
 	// Temporary IAM instance profile policy document
-	// If IamInstanceProfile is specified it will be used instead. Example:
+	// If IamInstanceProfile is specified it will be used instead.
 	//
+	// HCL2 example:
+	// ```hcl
+	//temporary_iam_instance_profile_policy_document {
+	//	Statement {
+	//		Action   = ["logs:*"]
+	//		Effect   = "Allow"
+	//		Resource = "*"
+	//	}
+	//	Version = "2012-10-17"
+	//}
+	// ```
+	//
+	// JSON example:
 	// ```json
 	//{
 	//	"Version": "2012-10-17",
@@ -166,17 +170,7 @@ type RunConfig struct {
 	// The EC2 instance type to use while building the
 	// AMI, such as t2.small.
 	InstanceType string `mapstructure:"instance_type" required:"true"`
-	// Filters used to populate the `security_group_ids` field. JSON Example:
-	//
-	// ```json
-	// {
-	//   "security_group_filter": {
-	//     "filters": {
-	//       "tag:Class": "packer"
-	//     }
-	//   }
-	// }
-	// ```
+	// Filters used to populate the `security_group_ids` field.
 	//
 	// HCL2 Example:
 	//
@@ -186,6 +180,17 @@ type RunConfig struct {
 	//       "tag:Class": "packer"
 	//     }
 	//   }
+	// ```
+	//
+	// JSON Example:
+	// ```json
+	// {
+	//   "security_group_filter": {
+	//     "filters": {
+	//       "tag:Class": "packer"
+	//     }
+	//   }
+	// }
 	// ```
 	//
 	// This selects the SG's with tag `Class` with the value `packer`.
@@ -199,14 +204,14 @@ type RunConfig struct {
 	SecurityGroupFilter SecurityGroupFilterOptions `mapstructure:"security_group_filter" required:"false"`
 	// Key/value pair tags to apply to the instance that is that is *launched*
 	// to create the EBS volumes. This is a [template
-	// engine](/docs/templates/engine), see [Build template
+	// engine](/docs/templates/legacy_json_templates/engine), see [Build template
 	// data](#build-template-data) for more information.
 	RunTags map[string]string `mapstructure:"run_tags" required:"false"`
 	// Same as [`run_tags`](#run_tags) but defined as a singular repeatable
 	// block containing a `key` and a `value` field. In HCL2 mode the
-	// [`dynamic_block`](/docs/configuration/from-1.5/expressions#dynamic-blocks)
+	// [`dynamic_block`](/docs/templates/hcl_templates/expressions#dynamic-blocks)
 	// will allow you to create those programatically.
-	RunTag hcl2template.KeyValues `mapstructure:"run_tag" required:"false"`
+	RunTag config.KeyValues `mapstructure:"run_tag" required:"false"`
 	// The ID (not the name) of the security
 	// group to assign to the instance. By default this is not set and Packer will
 	// automatically create a new temporary security group to allow SSH access.
@@ -219,12 +224,27 @@ type RunConfig struct {
 	SecurityGroupIds []string `mapstructure:"security_group_ids" required:"false"`
 	// The source AMI whose root volume will be copied and
 	// provisioned on the currently running instance. This must be an EBS-backed
-	// AMI with a root volume snapshot that you have access to. Note: this is not
-	// used when from_scratch is set to true.
+	// AMI with a root volume snapshot that you have access to.
 	SourceAmi string `mapstructure:"source_ami" required:"true"`
 	// Filters used to populate the `source_ami`
-	// field. JSON Example:
+	// field.
 	//
+	// HCL2 example:
+	// ```hcl
+	// source "amazon-ebs" "basic-example" {
+	//   source_ami_filter {
+	//     filters = {
+	//        virtualization-type = "hvm"
+	//        name = "ubuntu/images/\*ubuntu-xenial-16.04-amd64-server-\*"
+	//        root-device-type = "ebs"
+	//     }
+	//     owners = ["099720109477"]
+	//     most_recent = true
+	//   }
+	// }
+	// ```
+	//
+	// JSON Example:
 	// ```json
 	// "builders" [
 	//   {
@@ -240,21 +260,6 @@ type RunConfig struct {
 	//     }
 	//   }
 	// ]
-	// ```
-	// HCL2 example:
-	//
-	// ```hcl
-	// source "amazon-ebs" "basic-example" {
-	//   source_ami_filter {
-	//     filters = {
-	//        virtualization-type = "hvm"
-	//        name = "ubuntu/images/\*ubuntu-xenial-16.04-amd64-server-\*"
-	//        root-device-type = "ebs"
-	//     }
-	//     owners = ["099720109477"]
-	//     most_recent = true
-	//   }
-	// }
 	// ```
 	//
 	//   This selects the most recent Ubuntu 16.04 HVM EBS AMI from Canonical. NOTE:
@@ -319,12 +324,26 @@ type RunConfig struct {
 	SpotTags map[string]string `mapstructure:"spot_tags" required:"false"`
 	// Same as [`spot_tags`](#spot_tags) but defined as a singular repeatable block
 	// containing a `key` and a `value` field. In HCL2 mode the
-	// [`dynamic_block`](/docs/configuration/from-1.5/expressions#dynamic-blocks)
+	// [`dynamic_block`](/docs/templates/hcl_templates/expressions#dynamic-blocks)
 	// will allow you to create those programatically.
-	SpotTag hcl2template.KeyValues `mapstructure:"spot_tag" required:"false"`
+	SpotTag config.KeyValues `mapstructure:"spot_tag" required:"false"`
 	// Filters used to populate the `subnet_id` field.
-	// JSON Example:
 	//
+	// HCL2 example:
+	//
+	// ```hcl
+	// source "amazon-ebs" "basic-example" {
+	//   subnet_filter {
+	//     filters = {
+	//           "tag:Class": "build"
+	//     }
+	//     most_free = true
+	//     random = false
+	//   }
+	// }
+	// ```
+	//
+	// JSON Example:
 	// ```json
 	// "builders" [
 	//   {
@@ -338,19 +357,6 @@ type RunConfig struct {
 	//     }
 	//   }
 	// ]
-	// ```
-	// HCL2 example:
-	//
-	// ```hcl
-	// source "amazon-ebs" "basic-example" {
-	//   subnet_filter {
-	//     filters = {
-	//           "tag:Class": "build"
-	//     }
-	//     most_free = true
-	//     random = false
-	//   }
-	// }
 	// ```
 	//
 	//   This selects the Subnet with tag `Class` with the value `build`, which has
@@ -376,10 +382,12 @@ type RunConfig struct {
 	// subnet-12345def, where Packer will launch the EC2 instance. This field is
 	// required if you are using an non-default VPC.
 	SubnetId string `mapstructure:"subnet_id" required:"false"`
-	// The name of the temporary key pair to
-	// generate. By default, Packer generates a name that looks like
-	// `packer_<UUID>`, where &lt;UUID&gt; is a 36 character unique identifier.
-	TemporaryKeyPairName string `mapstructure:"temporary_key_pair_name" required:"false"`
+	// [Tenancy](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/dedicated-instance.html) used
+	// when Packer launches the EC2 instance, allowing it to be launched on dedicated hardware.
+	//
+	// The default is "default", meaning shared tenancy. Allowed values are "default",
+	// "dedicated" and "host".
+	Tenancy string `mapstructure:"tenancy" required:"false"`
 	// A list of IPv4 CIDR blocks to be authorized access to the instance, when
 	// packer is creating a temporary security group.
 	//
@@ -396,8 +404,21 @@ type RunConfig struct {
 	// data when launching the instance.
 	UserDataFile string `mapstructure:"user_data_file" required:"false"`
 	// Filters used to populate the `vpc_id` field.
-	// JSON Example:
 	//
+	// HCL2 example:
+	// ```hcl
+	// source "amazon-ebs" "basic-example" {
+	//   vpc_filter {
+	//     filters = {
+	//       "tag:Class": "build",
+	//       "isDefault": "false",
+	//       "cidr": "/24"
+	//     }
+	//   }
+	// }
+	// ```
+	//
+	// JSON Example:
 	// ```json
 	// "builders" [
 	//   {
@@ -411,19 +432,6 @@ type RunConfig struct {
 	//     }
 	//   }
 	// ]
-	// ```
-	// HCL2 example:
-	//
-	// ```hcl
-	// source "amazon-ebs" "basic-example" {
-	//   vpc_filter {
-	//     filters = {
-	//       "tag:Class": "build",
-	//       "isDefault": "false",
-	//       "cidr": "/24"
-	//     }
-	//   }
-	// }
 	// ```
 	//
 	// This selects the VPC with tag `Class` with the value `build`, which is not
@@ -447,6 +455,9 @@ type RunConfig struct {
 	// password for Windows instances. Defaults to 20 minutes. Example value:
 	// 10m
 	WindowsPasswordTimeout time.Duration `mapstructure:"windows_password_timeout" required:"false"`
+
+	// [Metadata Settings](#metadata-settings)
+	Metadata MetadataOptions `mapstructure:"metadata_options" required:"false"`
 
 	// Communicator settings
 	Comm communicator.Config `mapstructure:",squash"`
@@ -472,6 +483,13 @@ type RunConfig struct {
 	//    - Upon termination the secure tunnel will be terminated automatically, if however there is a failure in
 	//    terminating the tunnel it will automatically terminate itself after 20 minutes of inactivity.
 	SSHInterface string `mapstructure:"ssh_interface"`
+
+	// The time to wait before establishing the Session Manager session.
+	// The value of this should be a duration. Examples are
+	// `5s` and `1m30s` which will cause Packer to wait five seconds and one
+	// minute 30 seconds, respectively. If no set, defaults to 10 seconds.
+	// This option is useful when the remote port takes longer to become available.
+	PauseBeforeSSM time.Duration `mapstructure:"pause_before_ssm"`
 
 	// Which port to connect the local end of the session tunnel to. If
 	// left blank, Packer will choose a port for you from available ports.
@@ -501,12 +519,38 @@ func (c *RunConfig) Prepare(ctx *interpolate.Context) []error {
 	// Validation
 	errs := c.Comm.Prepare(ctx)
 
+	if c.Metadata.HttpEndpoint == "" {
+		c.Metadata.HttpEndpoint = "enabled"
+	}
+
+	if c.Metadata.HttpTokens == "" {
+		c.Metadata.HttpTokens = "optional"
+	}
+
+	if c.Metadata.HttpPutResponseHopLimit == 0 {
+		c.Metadata.HttpPutResponseHopLimit = 1
+	}
+
+	if c.Metadata.HttpEndpoint != "enabled" && c.Metadata.HttpEndpoint != "disabled" {
+		msg := fmt.Errorf("http_endpoint requires either disabled or enabled as its value")
+		errs = append(errs, msg)
+	}
+
+	if c.Metadata.HttpTokens != "optional" && c.Metadata.HttpTokens != "required" {
+		msg := fmt.Errorf("http_tokens requires either optional or required as its value")
+		errs = append(errs, msg)
+	}
+
+	if c.Metadata.HttpPutResponseHopLimit < 1 || c.Metadata.HttpPutResponseHopLimit > 64 {
+		msg := fmt.Errorf("http_put_response_hop_limit requires a number between 1 and 64")
+		errs = append(errs, msg)
+	}
+
 	// Copy singular tag maps
 	errs = append(errs, c.RunTag.CopyOn(&c.RunTags)...)
 	errs = append(errs, c.SpotTag.CopyOn(&c.SpotTags)...)
 
 	for _, preparer := range []interface{ Prepare() []error }{
-		&c.SourceAmiFilter,
 		&c.SecurityGroupFilter,
 		&c.SubnetFilter,
 		&c.VpcFilter,
@@ -618,6 +662,13 @@ func (c *RunConfig) Prepare(ctx *interpolate.Context) []error {
 		} else if c.InstanceType[0:firstDotIndex] != "t2" {
 			errs = append(errs, fmt.Errorf("Error: T2 Unlimited enabled with a non-T2 Instance Type: %s", c.InstanceType))
 		}
+	}
+
+	if c.Tenancy != "" &&
+		c.Tenancy != "default" &&
+		c.Tenancy != "dedicated" &&
+		c.Tenancy != "host" {
+		errs = append(errs, fmt.Errorf("Error: Unknown tenancy type %s", c.Tenancy))
 	}
 
 	return errs

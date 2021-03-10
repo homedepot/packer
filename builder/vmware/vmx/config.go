@@ -7,21 +7,23 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/hashicorp/packer-plugin-sdk/bootcommand"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/shutdowncommand"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	vmwcommon "github.com/hashicorp/packer/builder/vmware/common"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/common/bootcommand"
-	"github.com/hashicorp/packer/common/shutdowncommand"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
 )
 
 // Config is the configuration structure for the builder.
 type Config struct {
 	common.PackerConfig            `mapstructure:",squash"`
-	common.HTTPConfig              `mapstructure:",squash"`
-	common.FloppyConfig            `mapstructure:",squash"`
+	commonsteps.HTTPConfig         `mapstructure:",squash"`
+	commonsteps.FloppyConfig       `mapstructure:",squash"`
 	bootcommand.VNCConfig          `mapstructure:",squash"`
+	commonsteps.CDConfig           `mapstructure:",squash"`
 	vmwcommon.DriverConfig         `mapstructure:",squash"`
 	vmwcommon.OutputConfig         `mapstructure:",squash"`
 	vmwcommon.RunConfig            `mapstructure:",squash"`
@@ -45,6 +47,11 @@ type Config struct {
 	// scenarios. Most users will wish to create a full clone instead. Defaults
 	// to false.
 	Linked bool `mapstructure:"linked" required:"false"`
+	// Default to `null/empty`. The name of an
+	// **existing** snapshot to which the builder shall attach the VM before
+	// starting it. If no snapshot is specified the builder will simply start the
+	// VM from it's current state i.e. snapshot.
+	AttachSnapshot string `mapstructure:"attach_snapshot" required:"false"`
 	// Path to the source VMX file to clone. If
 	// remote_type is enabled then this specifies a path on the remote_host.
 	SourcePath string `mapstructure:"source_path" required:"true"`
@@ -77,40 +84,39 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 			"packer-%s-%d", c.PackerBuildName, interpolate.InitTime.Unix())
 	}
 
-	// Prepare the errors
-	var errs *packer.MultiError
-	errs = packer.MultiErrorAppend(errs, c.DriverConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.HTTPConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.OutputConfig.Prepare(&c.ctx, &c.PackerConfig)...)
-	errs = packer.MultiErrorAppend(errs, c.RunConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.ShutdownConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.SSHConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.ToolsConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.VMXConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.FloppyConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.VNCConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.ExportConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.DiskConfig.Prepare(&c.ctx)...)
+	// Accumulate any errors and warnings
+	var warnings []string
+	var errs *packersdk.MultiError
+
+	runConfigWarnings, runConfigErrs := c.RunConfig.Prepare(&c.ctx, &c.DriverConfig)
+	warnings = append(warnings, runConfigWarnings...)
+	errs = packersdk.MultiErrorAppend(errs, runConfigErrs...)
+	errs = packersdk.MultiErrorAppend(errs, c.DriverConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.HTTPConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.OutputConfig.Prepare(&c.ctx, &c.PackerConfig)...)
+	errs = packersdk.MultiErrorAppend(errs, c.ShutdownConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.SSHConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.ToolsConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.FloppyConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.CDConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.VNCConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.VNCConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.ExportConfig.Prepare(&c.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, c.DiskConfig.Prepare(&c.ctx)...)
 
 	if c.RemoteType == "" {
 		if c.SourcePath == "" {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("source_path is blank, but is required"))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("source_path is blank, but is required"))
 		} else {
 			if _, err := os.Stat(c.SourcePath); err != nil {
-				errs = packer.MultiErrorAppend(errs,
+				errs = packersdk.MultiErrorAppend(errs,
 					fmt.Errorf("source_path is invalid: %s", err))
 			}
 		}
-	} else {
-		// Remote configuration validation
-		if c.RemoteHost == "" {
-			errs = packer.MultiErrorAppend(errs,
-				fmt.Errorf("remote_host must be specified"))
-		}
-
-		if c.RemoteType != "esx5" {
-			errs = packer.MultiErrorAppend(errs,
-				fmt.Errorf("Only 'esx5' value is accepted for remote_type"))
+		if c.Headless && c.DisableVNC {
+			warnings = append(warnings,
+				"Headless mode uses VNC to retrieve output. Since VNC has been disabled,\n"+
+					"you won't be able to see any output.")
 		}
 	}
 
@@ -124,14 +130,14 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 	}
 
 	if c.Format == "" {
-		if c.RemoteType != "esx5" {
+		if c.RemoteType == "" {
 			c.Format = "vmx"
 		} else {
 			c.Format = "ovf"
 		}
 	}
 
-	if c.RemoteType != "esx5" && c.Format == "vmx" {
+	if c.RemoteType == "" && c.Format == "vmx" {
 		// if we're building locally and want a vmx, there's nothing to export.
 		// Set skip export flag here to keep the export step from attempting
 		// an unneded export
@@ -140,29 +146,13 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 
 	err = c.DriverConfig.Validate(c.SkipExport)
 	if err != nil {
-		errs = packer.MultiErrorAppend(errs, err)
+		errs = packersdk.MultiErrorAppend(errs, err)
 	}
 
-	if c.Format == "" {
-		if c.RemoteType != "esx5" {
-			c.Format = "vmx"
-		} else {
-			c.Format = "ovf"
-		}
-	}
-
-	// Warnings
-	var warnings []string
 	if c.ShutdownCommand == "" {
 		warnings = append(warnings,
 			"A shutdown_command was not specified. Without a shutdown command, Packer\n"+
 				"will forcibly halt the virtual machine, which may result in data loss.")
-	}
-
-	if c.Headless && c.DisableVNC {
-		warnings = append(warnings,
-			"Headless mode uses VNC to retrieve output. Since VNC has been disabled,\n"+
-				"you won't be able to see any output.")
 	}
 
 	// Check for any errors.

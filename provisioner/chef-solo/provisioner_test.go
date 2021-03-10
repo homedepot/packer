@@ -5,7 +5,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func testConfig() map[string]interface{} {
@@ -15,7 +16,7 @@ func testConfig() map[string]interface{} {
 func TestProvisioner_Impl(t *testing.T) {
 	var raw interface{}
 	raw = &Provisioner{}
-	if _, ok := raw.(packer.Provisioner); !ok {
+	if _, ok := raw.(packersdk.Provisioner); !ok {
 		t.Fatalf("must be a Provisioner")
 	}
 }
@@ -302,7 +303,7 @@ func TestProvisionerPrepare_json(t *testing.T) {
 		"foo": "{{ user `foo` }}",
 	}
 
-	config[packer.UserVariablesConfigKey] = map[string]string{
+	config[common.UserVariablesConfigKey] = map[string]string{
 		"foo": `"bar\baz"`,
 	}
 
@@ -340,6 +341,38 @@ func TestProvisionerPrepare_jsonNested(t *testing.T) {
 		"bInt":   1,
 		"bFloat": 4.5,
 	}
+
+	var p Provisioner
+	err := p.Prepare(config)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	fooMap := p.config.Json["foo"].(map[string]interface{})
+	if fooMap["bar"] != "baz" {
+		t.Fatalf("nope: %#v", fooMap["bar"])
+	}
+	if p.config.Json["bStr"] != "bar" {
+		t.Fatalf("nope: %#v", fooMap["bar"])
+	}
+}
+
+func TestProvisionerPrepare_jsonstring(t *testing.T) {
+	config := testConfig()
+	config["json_string"] = `{
+			"foo": {
+				"bar": "baz"
+			},
+			"bar": {
+				"bar": "baz"
+			},	
+			"bFalse": false,
+			"bTrue": true,
+			"bStr": "bar",
+			"bNil": null,
+			"bInt": 1,
+			"bFloat": 4.5
+		}`
 
 	var p Provisioner
 	err := p.Prepare(config)

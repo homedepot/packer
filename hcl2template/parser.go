@@ -5,51 +5,73 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/hashicorp/go-version"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/ext/dynblock"
 	"github.com/hashicorp/hcl/v2/hclparse"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/packer"
+	"github.com/zclconf/go-cty/cty"
 )
 
 const (
+	packerLabel       = "packer"
 	sourceLabel       = "source"
 	variablesLabel    = "variables"
 	variableLabel     = "variable"
 	localsLabel       = "locals"
+	localLabel        = "local"
+	dataSourceLabel   = "data"
 	buildLabel        = "build"
 	communicatorLabel = "communicator"
 )
 
 var configSchema = &hcl.BodySchema{
 	Blocks: []hcl.BlockHeaderSchema{
+		{Type: packerLabel},
 		{Type: sourceLabel, LabelNames: []string{"type", "name"}},
 		{Type: variablesLabel},
 		{Type: variableLabel, LabelNames: []string{"name"}},
 		{Type: localsLabel},
+		{Type: localLabel, LabelNames: []string{"name"}},
+		{Type: dataSourceLabel, LabelNames: []string{"type", "name"}},
 		{Type: buildLabel},
 		{Type: communicatorLabel, LabelNames: []string{"type", "name"}},
 	},
 }
 
+// packerBlockSchema is the schema for a top-level "packer" block in
+// a configuration file.
+var packerBlockSchema = &hcl.BodySchema{
+	Attributes: []hcl.AttributeSchema{
+		{Name: "required_version"},
+	},
+	Blocks: []hcl.BlockHeaderSchema{
+		{Type: "required_plugins"},
+	},
+}
+
 // Parser helps you parse HCL folders. It will parse an hcl file or directory
 // and start builders, provisioners and post-processors to configure them with
-// the parsed HCL and then return a []packer.Build. Packer will use that list
+// the parsed HCL and then return a []packersdk.Build. Packer will use that list
 // of Builds to run everything in order.
 type Parser struct {
+	CorePackerVersion *version.Version
+
+	CorePackerVersionString string
+
 	*hclparse.Parser
 
-	BuilderSchemas packer.BuilderStore
-
-	ProvisionersSchemas packer.ProvisionerStore
-
-	PostProcessorsSchemas packer.PostProcessorStore
+	PluginConfig *packer.PluginConfig
 }
 
 const (
-	hcl2FileExt        = ".pkr.hcl"
-	hcl2JsonFileExt    = ".pkr.json"
-	hcl2VarFileExt     = ".auto.pkrvars.hcl"
-	hcl2VarJsonFileExt = ".auto.pkrvars.json"
+	hcl2FileExt            = ".pkr.hcl"
+	hcl2JsonFileExt        = ".pkr.json"
+	hcl2VarFileExt         = ".pkrvars.hcl"
+	hcl2VarJsonFileExt     = ".pkrvars.json"
+	hcl2AutoVarFileExt     = ".auto.pkrvars.hcl"
+	hcl2AutoVarJsonFileExt = ".auto.pkrvars.json"
 )
 
 // Parse will Parse all HCL files in filename. Path can be a folder or a file.
@@ -104,20 +126,62 @@ func (p *Parser) Parse(filename string, varFiles []string, argVars map[string]st
 		})
 	}
 	cfg := &PackerConfig{
-		Basedir:               basedir,
-		Cwd:                   wd,
-		builderSchemas:        p.BuilderSchemas,
-		provisionersSchemas:   p.ProvisionersSchemas,
-		postProcessorsSchemas: p.PostProcessorsSchemas,
-		parser:                p,
-		files:                 files,
+		Basedir:                 basedir,
+		Cwd:                     wd,
+		CorePackerVersionString: p.CorePackerVersionString,
+		parser:                  p,
+		files:                   files,
+	}
+
+	for _, file := range files {
+		coreVersionConstraints, moreDiags := sniffCoreVersionRequirements(file.Body)
+		cfg.Packer.VersionConstraints = append(cfg.Packer.VersionConstraints, coreVersionConstraints...)
+		diags = append(diags, moreDiags...)
+	}
+
+	// Before we go further, we'll check to make sure this version can read
+	// all files, so we can produce a version-related error message rather than
+	// potentially-confusing downstream errors.
+	versionDiags := cfg.CheckCoreVersionRequirements(p.CorePackerVersion)
+	diags = append(diags, versionDiags...)
+	if versionDiags.HasErrors() {
+		return cfg, diags
+	}
+
+	// Decode required_plugins blocks and create implicit required_plugins
+	// blocks. Implicit required_plugins blocks happen when a builder or another
+	// plugin cannot be found, for example if one uses :
+	//  source "amazon-ebs" "example" { ... }
+	// And no `amazon-ebs` builder can be found. This will then be the
+	// equivalent of having :
+	//  packer {
+	//    required_plugins {
+	//      amazon = {
+	//        version = "latest"
+	//        source  = "github.com/hashicorp/amazon"
+	//    }
+	//  }
+	// Note: using `latest` ( or actually an empty string ) in a config file
+	// does not work and packer will ask you to pick a version
+	{
+		for _, file := range files {
+			diags = append(diags, cfg.decodeRequiredPluginsBlock(file)...)
+		}
+		for _, file := range files {
+			diags = append(diags, cfg.decodeImplicitRequiredPluginsBlocks(file)...)
+		}
 	}
 
 	// Decode variable blocks so that they are available later on. Here locals
-	// can use input variables so we decode them firsthand.
+	// can use input variables so we decode input variables first.
 	{
 		for _, file := range files {
 			diags = append(diags, cfg.decodeInputVariables(file)...)
+		}
+
+		for _, file := range files {
+			morediags := p.decodeDatasources(file, cfg)
+			diags = append(diags, morediags...)
 		}
 
 		for _, file := range files {
@@ -129,7 +193,7 @@ func (p *Parser) Parse(filename string, varFiles []string, argVars map[string]st
 
 	// parse var files
 	{
-		hclVarFiles, jsonVarFiles, moreDiags := GetHCL2Files(filename, hcl2VarFileExt, hcl2VarJsonFileExt)
+		hclVarFiles, jsonVarFiles, moreDiags := GetHCL2Files(filename, hcl2AutoVarFileExt, hcl2AutoVarJsonFileExt)
 		diags = append(diags, moreDiags...)
 		for _, file := range varFiles {
 			switch filepath.Ext(file) {
@@ -165,33 +229,104 @@ func (p *Parser) Parse(filename string, varFiles []string, argVars map[string]st
 
 		diags = append(diags, cfg.collectInputVariableValues(os.Environ(), varFiles, argVars)...)
 	}
+
+	// parse the actual content // rest
+	for _, file := range cfg.files {
+		diags = append(diags, cfg.parser.parseConfig(file, cfg)...)
+	}
 	return cfg, diags
 }
 
-func (cfg *PackerConfig) Initialize() hcl.Diagnostics {
+// sniffCoreVersionRequirements does minimal parsing of the given body for
+// "packer" blocks with "required_version" attributes, returning the
+// requirements found.
+//
+// This is intended to maximize the chance that we'll be able to read the
+// requirements (syntax errors notwithstanding) even if the config file contains
+// constructs that might've been added in future versions
+//
+// This is a "best effort" sort of method which will return constraints it is
+// able to find, but may return no constraints at all if the given body is
+// so invalid that it cannot be decoded at all.
+func sniffCoreVersionRequirements(body hcl.Body) ([]VersionConstraint, hcl.Diagnostics) {
+
+	var sniffRootSchema = &hcl.BodySchema{
+		Blocks: []hcl.BlockHeaderSchema{
+			{
+				Type: packerLabel,
+			},
+		},
+	}
+
+	rootContent, _, diags := body.PartialContent(sniffRootSchema)
+
+	var constraints []VersionConstraint
+
+	for _, block := range rootContent.Blocks {
+		content, blockDiags := block.Body.Content(packerBlockSchema)
+		diags = append(diags, blockDiags...)
+
+		attr, exists := content.Attributes["required_version"]
+		if !exists {
+			continue
+		}
+
+		constraint, constraintDiags := decodeVersionConstraint(attr)
+		diags = append(diags, constraintDiags...)
+		if !constraintDiags.HasErrors() {
+			constraints = append(constraints, constraint)
+		}
+	}
+
+	return constraints, diags
+}
+
+func filterVarsFromLogs(inputOrLocal Variables) {
+	for _, variable := range inputOrLocal {
+		if !variable.Sensitive {
+			continue
+		}
+		value, _ := variable.Value()
+		_ = cty.Walk(value, func(_ cty.Path, nested cty.Value) (bool, error) {
+			if nested.IsWhollyKnown() && !nested.IsNull() && nested.Type().Equals(cty.String) {
+				packersdk.LogSecretFilter.Set(nested.AsString())
+			}
+			return true, nil
+		})
+	}
+}
+
+func (cfg *PackerConfig) Initialize(opts packer.InitializeOptions) hcl.Diagnostics {
 	var diags hcl.Diagnostics
 
-	_, moreDiags := cfg.InputVariables.Values()
+	// enable packer to start plugins requested in required_plugins.
+	moreDiags := cfg.detectPluginBinaries()
+	diags = append(diags, moreDiags...)
+	if moreDiags.HasErrors() {
+		return diags
+	}
+
+	_, moreDiags = cfg.InputVariables.Values()
 	diags = append(diags, moreDiags...)
 	_, moreDiags = cfg.LocalVariables.Values()
 	diags = append(diags, moreDiags...)
+	diags = append(diags, cfg.evaluateDatasources(opts.SkipDatasourcesExecution)...)
 	diags = append(diags, cfg.evaluateLocalVariables(cfg.LocalBlocks)...)
 
-	// decode the actual content
-	for _, file := range cfg.files {
-		diags = append(diags, cfg.parser.decodeConfig(file, cfg)...)
-	}
+	filterVarsFromLogs(cfg.InputVariables)
+	filterVarsFromLogs(cfg.LocalVariables)
+
+	diags = append(diags, cfg.initializeBlocks()...)
 
 	return diags
 }
 
-// decodeConfig looks in the found blocks for everything that is not a variable
-// block. It should be called after parsing input variables and locals so that
-// they can be referenced.
-func (p *Parser) decodeConfig(f *hcl.File, cfg *PackerConfig) hcl.Diagnostics {
+// parseConfig looks in the found blocks for everything that is not a variable
+// block.
+func (p *Parser) parseConfig(f *hcl.File, cfg *PackerConfig) hcl.Diagnostics {
 	var diags hcl.Diagnostics
 
-	body := dynblock.Expand(f.Body, cfg.EvalContext(nil))
+	body := f.Body
 	content, moreDiags := body.Content(configSchema)
 	diags = append(diags, moreDiags...)
 
@@ -231,6 +366,44 @@ func (p *Parser) decodeConfig(f *hcl.File, cfg *PackerConfig) hcl.Diagnostics {
 			}
 			cfg.Builds = append(cfg.Builds, build)
 
+		}
+	}
+
+	return diags
+}
+
+func (p *Parser) decodeDatasources(file *hcl.File, cfg *PackerConfig) hcl.Diagnostics {
+	var diags hcl.Diagnostics
+
+	body := dynblock.Expand(file.Body, cfg.EvalContext(DatasourceContext, nil))
+	content, moreDiags := body.Content(configSchema)
+	diags = append(diags, moreDiags...)
+
+	for _, block := range content.Blocks {
+		switch block.Type {
+		case dataSourceLabel:
+			datasource, moreDiags := p.decodeDataBlock(block)
+			diags = append(diags, moreDiags...)
+			if moreDiags.HasErrors() {
+				continue
+			}
+			ref := datasource.Ref()
+			if existing, found := cfg.Datasources[ref]; found {
+				diags = append(diags, &hcl.Diagnostic{
+					Severity: hcl.DiagError,
+					Summary:  "Duplicate " + dataSourceLabel + " block",
+					Detail: fmt.Sprintf("This "+dataSourceLabel+" block has the "+
+						"same data type and name as a previous block declared "+
+						"at %s. Each "+dataSourceLabel+" must have a unique name per builder type.",
+						existing.block.DefRange.Ptr()),
+					Subject: datasource.block.DefRange.Ptr(),
+				})
+				continue
+			}
+			if cfg.Datasources == nil {
+				cfg.Datasources = Datasources{}
+			}
+			cfg.Datasources[ref] = *datasource
 		}
 	}
 

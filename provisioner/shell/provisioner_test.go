@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func testConfig() map[string]interface{} {
@@ -20,7 +20,7 @@ func testConfig() map[string]interface{} {
 func TestProvisioner_Impl(t *testing.T) {
 	var raw interface{}
 	raw = &Provisioner{}
-	if _, ok := raw.(packer.Provisioner); !ok {
+	if _, ok := raw.(packersdk.Provisioner); !ok {
 		t.Fatalf("must be a Provisioner")
 	}
 }
@@ -563,8 +563,8 @@ func TestProvisionerRemotePathDefaultsSuccessfully(t *testing.T) {
 
 func generatedData() map[string]interface{} {
 	return map[string]interface{}{
-		"PackerHTTPAddr": common.HttpAddrNotImplemented,
-		"PackerHTTPIP":   common.HttpIPNotImplemented,
-		"PackerHTTPPort": common.HttpPortNotImplemented,
+		"PackerHTTPAddr": commonsteps.HttpAddrNotImplemented,
+		"PackerHTTPIP":   commonsteps.HttpIPNotImplemented,
+		"PackerHTTPPort": commonsteps.HttpPortNotImplemented,
 	}
 }

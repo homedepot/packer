@@ -3,7 +3,7 @@ package bsusurrogate
 import (
 	"testing"
 
-	builderT "github.com/hashicorp/packer/helper/builder/testing"
+	builderT "github.com/hashicorp/packer-plugin-sdk/acctest"
 )
 
 func TestBuilderAcc_basic(t *testing.T) {
@@ -24,7 +24,7 @@ const testBuilderAccBasic = `
 		"type": "test",
 		"region": "eu-west-2",
 		"vm_type": "t2.micro",
-		"source_omi": "ami-65efcc11",
+		"source_omi": "ami-abe953fa",
 		"ssh_username": "outscale",
 		"omi_name": "packer-test {{timestamp}}",
 		"omi_virtualization_type": "hvm",

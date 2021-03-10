@@ -6,36 +6,26 @@ package yandeximport
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	"github.com/hashicorp/packer/builder/file"
 	"github.com/hashicorp/packer/builder/yandex"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
 	"github.com/hashicorp/packer/post-processor/artifice"
 	"github.com/hashicorp/packer/post-processor/compress"
 	yandexexport "github.com/hashicorp/packer/post-processor/yandex-export"
-	"github.com/hashicorp/packer/template/interpolate"
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/iam/v1/awscompatibility"
-	"github.com/yandex-cloud/go-sdk/iamkey"
 )
 
 type Config struct {
-	common.PackerConfig `mapstructure:",squash"`
-
-	// The folder ID that will be used to store imported Image.
-	FolderID string `mapstructure:"folder_id" required:"true"`
-	// Service Account ID with proper permission to use Storage service
-	// for operations 'upload' and 'delete' object to `bucket`
-	ServiceAccountID string `mapstructure:"service_account_id" required:"true"`
-
-	// OAuth token to use to authenticate to Yandex.Cloud.
-	Token string `mapstructure:"token" required:"false"`
-	// Path to file with Service Account key in json format. This
-	// is an alternative method to authenticate to Yandex.Cloud.
-	ServiceAccountKeyFile string `mapstructure:"service_account_key_file" required:"false"`
+	common.PackerConfig         `mapstructure:",squash"`
+	yandex.AccessConfig         `mapstructure:",squash"`
+	yandex.CloudConfig          `mapstructure:",squash"`
+	yandexexport.ExchangeConfig `mapstructure:",squash"`
+	yandex.ImageConfig          `mapstructure:",squash"`
 
 	// The name of the bucket where the qcow2 file will be uploaded to for import.
 	// This bucket must exist when the post-processor is run.
@@ -44,23 +34,13 @@ type Config struct {
 	// in storage service and first paths (URL) is used to, so no need to set this param.
 	Bucket string `mapstructure:"bucket" required:"false"`
 	// The name of the object key in `bucket` where the qcow2 file will be copied to import.
-	// This is a [template engine](/docs/templates/engine).
+	// This is a [template engine](/docs/templates/legacy_json_templates/engine).
 	// Therefore, you may use user variables and template functions in this field.
 	ObjectName string `mapstructure:"object_name" required:"false"`
 	// Whether skip removing the qcow2 file uploaded to Storage
 	// after the import process has completed. Possible values are: `true` to
-	// leave it in the bucket, `false` to remove it. (Default: `false`).
+	// leave it in the bucket, `false` to remove it. Default is `false`.
 	SkipClean bool `mapstructure:"skip_clean" required:"false"`
-
-	// The name of the image, which contains 1-63 characters and only
-	// supports lowercase English characters, numbers and hyphen.
-	ImageName string `mapstructure:"image_name" required:"false"`
-	// The description of the image.
-	ImageDescription string `mapstructure:"image_description" required:"false"`
-	// The family name of the imported image.
-	ImageFamily string `mapstructure:"image_family" required:"false"`
-	// Key/value pair labels to apply to the imported image.
-	ImageLabels map[string]string `mapstructure:"image_labels" required:"false"`
 
 	ctx interpolate.Context
 }
@@ -73,6 +53,7 @@ func (p *PostProcessor) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMap
 
 func (p *PostProcessor) Configure(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -85,31 +66,13 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		return err
 	}
 
-	errs := new(packer.MultiError)
+	// Accumulate any errors
+	var errs *packersdk.MultiError
 
-	// provision config by OS environment variables
-	if p.config.Token == "" {
-		p.config.Token = os.Getenv("YC_TOKEN")
-	}
-
-	if p.config.ServiceAccountKeyFile == "" {
-		p.config.ServiceAccountKeyFile = os.Getenv("YC_SERVICE_ACCOUNT_KEY_FILE")
-	}
-
-	if p.config.Token != "" {
-		packer.LogSecretFilter.Set(p.config.Token)
-	}
-
-	if p.config.ServiceAccountKeyFile != "" {
-		if _, err := iamkey.ReadFromJSONFile(p.config.ServiceAccountKeyFile); err != nil {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("fail to read service account key file: %s", err))
-		}
-	}
-
-	if p.config.FolderID == "" {
-		p.config.FolderID = os.Getenv("YC_FOLDER_ID")
-	}
+	errs = packersdk.MultiErrorAppend(errs, p.config.AccessConfig.Prepare(&p.config.ctx)...)
+	errs = p.config.CloudConfig.Prepare(errs)
+	errs = p.config.ImageConfig.Prepare(errs)
+	errs = p.config.ExchangeConfig.Prepare(errs)
 
 	// Set defaults
 	if p.config.ObjectName == "" {
@@ -118,22 +81,8 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 
 	// Check and render object_name
 	if err = interpolate.Validate(p.config.ObjectName, &p.config.ctx); err != nil {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("error parsing object_name template: %s", err))
-	}
-
-	// TODO: make common code to check and prepare Yandex.Cloud auth configuration data
-
-	templates := map[string]*string{
-		"object_name": &p.config.ObjectName,
-		"folder_id":   &p.config.FolderID,
-	}
-
-	for key, ptr := range templates {
-		if *ptr == "" {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("%s must be set", key))
-		}
 	}
 
 	if len(errs.Errors) > 0 {
@@ -143,7 +92,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	return nil
 }
 
-func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, bool, error) {
+func (p *PostProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, artifact packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
 	var imageSrc cloudImageSource
 	var fileSource bool
 	var err error
@@ -160,12 +109,8 @@ func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact 
 		return nil, false, false, fmt.Errorf("error rendering object_name template: %s", err)
 	}
 
-	cfg := &yandex.Config{
-		Token:                 p.config.Token,
-		ServiceAccountKeyFile: p.config.ServiceAccountKeyFile,
-	}
+	client, err := yandex.NewDriverYC(ui, &p.config.AccessConfig)
 
-	client, err := yandex.NewDriverYC(ui, cfg)
 	if err != nil {
 		return nil, false, false, err
 	}
@@ -225,7 +170,7 @@ func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact 
 		return nil, false, false, err
 	}
 
-	ycImage, err := createYCImage(ctx, client, ui, p.config.FolderID, imageSrc, p.config.ImageName, p.config.ImageDescription, p.config.ImageFamily, p.config.ImageLabels)
+	ycImage, err := createYCImage(ctx, client, ui, imageSrc, &p.config)
 	if err != nil {
 		return nil, false, false, err
 	}
@@ -254,7 +199,7 @@ func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact 
 	}, false, false, nil
 }
 
-func chooseSource(a packer.Artifact) (cloudImageSource, error) {
+func chooseSource(a packersdk.Artifact) (cloudImageSource, error) {
 	st := a.State("source_type").(string)
 	if st == "" {
 		return nil, fmt.Errorf("could not determine source type of yandex-import artifact: %v", a)

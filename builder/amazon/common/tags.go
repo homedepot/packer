@@ -5,16 +5,16 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/hashicorp/packer/builder"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/packerbuilderdata"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 type TagMap map[string]string
 type EC2Tags []*ec2.Tag
 
-func (t EC2Tags) Report(ui packer.Ui) {
+func (t EC2Tags) Report(ui packersdk.Ui) {
 	for _, tag := range t {
 		ui.Message(fmt.Sprintf("Adding tag: \"%s\": \"%s\"",
 			aws.StringValue(tag.Key), aws.StringValue(tag.Value)))
@@ -23,7 +23,7 @@ func (t EC2Tags) Report(ui packer.Ui) {
 
 func (t TagMap) EC2Tags(ictx interpolate.Context, region string, state multistep.StateBag) (EC2Tags, error) {
 	var ec2Tags []*ec2.Tag
-	generatedData := builder.GeneratedData{State: state}
+	generatedData := packerbuilderdata.GeneratedData{State: state}
 	ictx.Data = extractBuildInfo(region, state, &generatedData)
 
 	for key, value := range t {

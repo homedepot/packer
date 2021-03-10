@@ -1,7 +1,7 @@
 //go:generate struct-markdown
 //go:generate mapstructure-to-hcl2 -type Config
 
-// The instance package contains a packer.Builder implementation that builds
+// The instance package contains a packersdk.Builder implementation that builds
 // AMIs for Amazon EC2 backed by instance storage, as opposed to EBS storage.
 package instance
 
@@ -15,14 +15,15 @@ import (
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/hashicorp/hcl/v2/hcldec"
-	"github.com/hashicorp/packer/builder"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/packerbuilderdata"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	awscommon "github.com/hashicorp/packer/builder/amazon/common"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
 )
 
 // The unique ID for this builder
@@ -107,6 +108,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 
 	b.config.ctx.Funcs = awscommon.TemplateFuncs
 	err := config.Decode(&b.config, &config.DecodeOpts{
+		PluginType:         BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &b.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -174,41 +176,41 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	}
 
 	// Accumulate any errors
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 	var warns []string
-	errs = packer.MultiErrorAppend(errs, b.config.AccessConfig.Prepare(&b.config.ctx)...)
-	errs = packer.MultiErrorAppend(errs, b.config.AMIMappings.Prepare(&b.config.ctx)...)
-	errs = packer.MultiErrorAppend(errs, b.config.LaunchMappings.Prepare(&b.config.ctx)...)
-	errs = packer.MultiErrorAppend(errs,
+	errs = packersdk.MultiErrorAppend(errs, b.config.AccessConfig.Prepare()...)
+	errs = packersdk.MultiErrorAppend(errs, b.config.AMIMappings.Prepare(&b.config.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, b.config.LaunchMappings.Prepare(&b.config.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs,
 		b.config.AMIConfig.Prepare(&b.config.AccessConfig, &b.config.ctx)...)
-	errs = packer.MultiErrorAppend(errs, b.config.RunConfig.Prepare(&b.config.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, b.config.RunConfig.Prepare(&b.config.ctx)...)
 
 	if b.config.AccountId == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("account_id is required"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("account_id is required"))
 	} else {
 		b.config.AccountId = strings.Replace(b.config.AccountId, "-", "", -1)
 	}
 
 	if b.config.S3Bucket == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("s3_bucket is required"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("s3_bucket is required"))
 	}
 
 	if b.config.X509CertPath == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("x509_cert_path is required"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("x509_cert_path is required"))
 	} else if _, err := os.Stat(b.config.X509CertPath); err != nil {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("x509_cert_path points to bad file: %s", err))
 	}
 
 	if b.config.X509KeyPath == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("x509_key_path is required"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("x509_key_path is required"))
 	} else if _, err := os.Stat(b.config.X509KeyPath); err != nil {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("x509_key_path points to bad file: %s", err))
 	}
 
 	if b.config.IsSpotInstance() && ((b.config.AMIENASupport.True()) || b.config.AMISriovNetSupport) {
-		errs = packer.MultiErrorAppend(errs,
+		errs = packersdk.MultiErrorAppend(errs,
 			fmt.Errorf("Spot instances do not support modification, which is required "+
 				"when either `ena_support` or `sriov_support` are set. Please ensure "+
 				"you use an AMI that already has either SR-IOV or ENA enabled."))
@@ -225,13 +227,13 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	if errs != nil && len(errs.Errors) > 0 {
 		return nil, warns, errs
 	}
-	packer.LogSecretFilter.Set(b.config.AccessKey, b.config.SecretKey, b.config.Token)
+	packersdk.LogSecretFilter.Set(b.config.AccessKey, b.config.SecretKey, b.config.Token)
 
 	generatedData := awscommon.GetGeneratedDataList()
 	return generatedData, warns, nil
 }
 
-func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (packer.Artifact, error) {
+func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook) (packersdk.Artifact, error) {
 	session, err := b.config.Session()
 	if err != nil {
 		return nil, err
@@ -249,7 +251,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 	state.Put("awsSession", session)
 	state.Put("hook", hook)
 	state.Put("ui", ui)
-	generatedData := &builder.GeneratedData{State: state}
+	generatedData := &packerbuilderdata.GeneratedData{State: state}
 
 	var instanceStep multistep.Step
 
@@ -264,6 +266,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			Debug:                    b.config.PackerDebug,
 			EbsOptimized:             b.config.EbsOptimized,
 			InstanceType:             b.config.InstanceType,
+			Region:                   *ec2conn.Config.Region,
 			SourceAMI:                b.config.SourceAmi,
 			SpotPrice:                b.config.SpotPrice,
 			SpotInstanceTypes:        b.config.SpotInstanceTypes,
@@ -286,6 +289,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			IsRestricted:             b.config.IsChinaCloud() || b.config.IsGovCloud(),
 			SourceAMI:                b.config.SourceAmi,
 			Tags:                     b.config.RunTags,
+			Tenancy:                  b.config.Tenancy,
 			UserData:                 b.config.UserData,
 			UserDataFile:             b.config.UserDataFile,
 		}
@@ -343,6 +347,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 		&awscommon.StepCreateSSMTunnel{
 			AWSSession:       session,
 			Region:           *ec2conn.Config.Region,
+			PauseBeforeSSM:   b.config.PauseBeforeSSM,
 			LocalPortNumber:  b.config.SessionManagerPort,
 			RemotePortNumber: b.config.Comm.Port(),
 			SSMAgentEnabled:  b.config.SSMAgentEnabled(),
@@ -365,8 +370,8 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 		&awscommon.StepSetGeneratedData{
 			GeneratedData: generatedData,
 		},
-		&common.StepProvision{},
-		&common.StepCleanupTempKeys{
+		&commonsteps.StepProvision{},
+		&commonsteps.StepCleanupTempKeys{
 			Comm: &b.config.RunConfig.Comm,
 		},
 		&StepUploadX509Cert{},
@@ -416,7 +421,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 	}
 
 	// Run!
-	b.runner = common.NewRunner(steps, b.config.PackerConfig, ui)
+	b.runner = commonsteps.NewRunner(steps, b.config.PackerConfig, ui)
 	b.runner.Run(ctx, state)
 
 	// If there was an error, return that

@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 )
 
 // Fusion5Driver is a driver that can run VMware Fusion 5.
@@ -24,7 +24,14 @@ type Fusion5Driver struct {
 	SSHConfig *SSHConfig
 }
 
-func (d *Fusion5Driver) Clone(dst, src string, linked bool) error {
+func NewFusion5Driver(dconfig *DriverConfig, config *SSHConfig) Driver {
+	return &Fusion5Driver{
+		AppPath:   dconfig.FusionAppPath,
+		SSHConfig: config,
+	}
+}
+
+func (d *Fusion5Driver) Clone(dst, src string, linked bool, snapshot string) error {
 	return errors.New("Cloning is not supported with Fusion 5. Please use Fusion 6+.")
 }
 

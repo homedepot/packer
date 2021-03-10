@@ -5,9 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
+	"net/http"
+	"time"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	metadata "cloud.google.com/go/compute/metadata"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"google.golang.org/api/oauth2/v2"
 )
 
@@ -23,7 +27,7 @@ type StepImportOSLoginSSHKey struct {
 func (s *StepImportOSLoginSSHKey) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	if !config.UseOSLogin {
 		return multistep.ActionContinue
@@ -36,7 +40,10 @@ func (s *StepImportOSLoginSSHKey) Run(ctx context.Context, state multistep.State
 		return multistep.ActionContinue
 	}
 
-	if s.TokeninfoFunc == nil {
+	// Are we running packer on a GCE ?
+	s.accountEmail = getGCEUser()
+
+	if s.TokeninfoFunc == nil && s.accountEmail == "" {
 		s.TokeninfoFunc = tokeninfo
 	}
 
@@ -46,8 +53,8 @@ func (s *StepImportOSLoginSSHKey) Run(ctx context.Context, state multistep.State
 	sha256sum := sha256.Sum256(config.Comm.SSHPublicKey)
 	state.Put("ssh_key_public_sha256", hex.EncodeToString(sha256sum[:]))
 
-	if config.account != nil {
-		s.accountEmail = config.account.Email
+	if config.account != nil && s.accountEmail == "" {
+		s.accountEmail = config.account.jwt.Email
 	}
 
 	if s.accountEmail == "" {
@@ -60,6 +67,13 @@ func (s *StepImportOSLoginSSHKey) Run(ctx context.Context, state multistep.State
 		}
 
 		s.accountEmail = info.Email
+	}
+
+	if s.accountEmail == "" {
+		err := fmt.Errorf("All options for deriving the OSLogin user have been exhausted")
+		state.Put("error", err)
+		ui.Error(err.Error())
+		return multistep.ActionHalt
 	}
 
 	loginProfile, err := driver.ImportOSLoginSSHKey(s.accountEmail, string(config.Comm.SSHPublicKey))
@@ -100,7 +114,7 @@ func (s *StepImportOSLoginSSHKey) Run(ctx context.Context, state multistep.State
 func (s *StepImportOSLoginSSHKey) Cleanup(state multistep.StateBag) {
 	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	if !config.UseOSLogin {
 		return
@@ -129,4 +143,29 @@ func tokeninfo(ctx context.Context) (*oauth2.Tokeninfo, error) {
 	}
 
 	return svc.Tokeninfo().Context(ctx).Do()
+}
+
+// getGCEUser determines if we're running packer on a GCE, and if we are, gets the associated service account email for subsequent use with OSLogin.
+// There are cases where we are running on a GCE, but the GCP metadata server isn't accessible. GitLab docker-engine runners are an edge case example of this.
+// It makes little sense to run packer on GCP in this way, however, we defensively timeout in those cases, rather than abort.
+func getGCEUser() string {
+
+	metadataCheckTimeout := 5 * time.Second
+	metadataCheckChl := make(chan string, 1)
+
+	go func() {
+		if metadata.OnGCE() {
+			GCEUser, _ := metadata.NewClient(&http.Client{}).Email("")
+			metadataCheckChl <- GCEUser
+		}
+	}()
+
+	select {
+	case thisGCEUser := <-metadataCheckChl:
+		log.Printf("[INFO] OSLogin: GCE service account %s will be used for identity", thisGCEUser)
+		return thisGCEUser
+	case <-time.After(metadataCheckTimeout):
+		log.Printf("[INFO] OSLogin: Could not derive a GCE service account from google metadata server after %s", metadataCheckTimeout)
+		return ""
+	}
 }

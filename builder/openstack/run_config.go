@@ -7,9 +7,9 @@ import (
 	"fmt"
 
 	"github.com/gophercloud/gophercloud/openstack/imageservice/v2/images"
-	"github.com/hashicorp/packer/common/uuid"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/uuid"
 )
 
 // RunConfig contains configuration for running an instance from a source image
@@ -33,6 +33,13 @@ type RunConfig struct {
 	// The name of the base image to use. This is an alternative way of
 	// providing source_image and only either of them can be specified.
 	SourceImageName string `mapstructure:"source_image_name" required:"true"`
+	// The URL of an external base image to use. This is an alternative way of
+	// providing source_image and only either of them can be specified.
+	ExternalSourceImageURL string `mapstructure:"external_source_image_url" required:"true"`
+	// The format of the external source image to use, e.g. qcow2, raw.
+	ExternalSourceImageFormat string `mapstructure:"external_source_image_format" required:"false"`
+	// Properties to set for the external source image
+	ExternalSourceImageProperties map[string]string `mapstructure:"external_source_image_properties" required:"false"`
 	// Filters used to populate filter options. Example:
 	//
 	// ```json
@@ -247,10 +254,26 @@ func (c *RunConfig) Prepare(ctx *interpolate.Context) []error {
 		}
 	}
 
-	if c.SourceImage == "" && c.SourceImageName == "" && c.SourceImageFilters.Filters.Empty() {
-		errs = append(errs, errors.New("Either a source_image, a source_image_name, or source_image_filter must be specified"))
-	} else if len(c.SourceImage) > 0 && len(c.SourceImageName) > 0 {
-		errs = append(errs, errors.New("Only a source_image or a source_image_name can be specified, not both."))
+	if c.SourceImage == "" && c.SourceImageName == "" && c.ExternalSourceImageURL == "" && c.SourceImageFilters.Filters.Empty() {
+		errs = append(errs, errors.New("Either a source_image, a source_image_name, an external_source_image_url or source_image_filter must be specified"))
+	} else {
+		// Make sure we've only set one image source option
+		thereCanBeOnlyOne := []bool{len(c.SourceImageName) > 0, len(c.SourceImage) > 0, len(c.ExternalSourceImageURL) > 0, !c.SourceImageFilters.Filters.Empty()}
+		numSet := 0
+		for _, val := range thereCanBeOnlyOne {
+			if val {
+				numSet += 1
+			}
+		}
+
+		if numSet > 1 {
+			errs = append(errs, errors.New("Only one of the options source_image, source_image_name, external_source_image_url, or source_image_filter can be specified, not multiple."))
+		}
+	}
+
+	// if external_source_image_format is not set use qcow2 as default
+	if c.ExternalSourceImageFormat == "" {
+		c.ExternalSourceImageFormat = "qcow2"
 	}
 
 	if c.Flavor == "" {
@@ -283,9 +306,9 @@ func (c *RunConfig) Prepare(ctx *interpolate.Context) []error {
 		}
 	}
 
-	// if neither ID or image name is provided outside the filter, build the
-	// filter
-	if len(c.SourceImage) == 0 && len(c.SourceImageName) == 0 {
+	// if neither ID, image name or external image URL is provided outside the filter,
+	// build the filter
+	if len(c.SourceImage) == 0 && len(c.SourceImageName) == 0 && len(c.ExternalSourceImageURL) == 0 {
 
 		listOpts, filterErr := c.SourceImageFilters.Filters.Build()
 
@@ -293,6 +316,11 @@ func (c *RunConfig) Prepare(ctx *interpolate.Context) []error {
 			errs = append(errs, filterErr)
 		}
 		c.sourceImageOpts = *listOpts
+	}
+
+	// if c.ExternalSourceImageURL is set use a generated source image name
+	if c.ExternalSourceImageURL != "" {
+		c.SourceImageName = fmt.Sprintf("packer_%s", uuid.TimeOrderedUUID())
 	}
 
 	return errs

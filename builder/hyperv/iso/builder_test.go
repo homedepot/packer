@@ -9,9 +9,10 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	hypervcommon "github.com/hashicorp/packer/builder/hyperv/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 func testConfig() map[string]interface{} {
@@ -25,14 +26,14 @@ func testConfig() map[string]interface{} {
 		"disk_block_size":         1,
 		"guest_additions_mode":    "none",
 		"disk_additional_size":    "50000,40000,30000",
-		packer.BuildNameConfigKey: "foo",
+		common.BuildNameConfigKey: "foo",
 	}
 }
 
 func TestBuilder_ImplementsBuilder(t *testing.T) {
 	var raw interface{}
 	raw = &Builder{}
-	if _, ok := raw.(packer.Builder); !ok {
+	if _, ok := raw.(packersdk.Builder); !ok {
 		t.Error("Builder must implement builder.")
 	}
 }
@@ -213,7 +214,7 @@ func TestBuilderPrepare_FloppyFiles(t *testing.T) {
 		t.Fatalf("bad: %#v", b.config.FloppyFiles)
 	}
 
-	floppiesPath := "../../../common/test-fixtures/floppies"
+	floppiesPath := "../../test-fixtures/floppies"
 	config["floppy_files"] = []string{fmt.Sprintf("%s/bar.bat", floppiesPath), fmt.Sprintf("%s/foo.ps1", floppiesPath)}
 	b = Builder{}
 	_, warns, err = b.Prepare(config)
@@ -240,7 +241,7 @@ func TestBuilderPrepare_InvalidFloppies(t *testing.T) {
 		t.Fatalf("Nonexistent floppies should trigger multierror")
 	}
 
-	if len(errs.(*packer.MultiError).Errors) != 2 {
+	if len(errs.(*packersdk.MultiError).Errors) != 2 {
 		t.Fatalf("Multierror should work and report 2 errors")
 	}
 }
@@ -590,7 +591,7 @@ func TestUserVariablesInBootCommand(t *testing.T) {
 	var b Builder
 	config := testConfig()
 
-	config[packer.UserVariablesConfigKey] = map[string]string{"test-variable": "test"}
+	config[common.UserVariablesConfigKey] = map[string]string{"test-variable": "test"}
 	config["boot_command"] = []string{"blah {{user `test-variable`}} blah"}
 
 	_, warns, err := b.Prepare(config)
@@ -601,8 +602,8 @@ func TestUserVariablesInBootCommand(t *testing.T) {
 		t.Fatalf("should not have error: %s", err)
 	}
 
-	ui := packer.TestUi(t)
-	hook := &packer.MockHook{}
+	ui := packersdk.TestUi(t)
+	hook := &packersdk.MockHook{}
 	driver := &hypervcommon.DriverMock{}
 
 	// Set up the state.

@@ -5,18 +5,19 @@ import (
 	"fmt"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 func (b *Builder) ConfigSpec() hcldec.ObjectSpec { return b.config.FlatMapstructure().HCL2Spec() }
 
 func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	err := config.Decode(&b.config, &config.DecodeOpts{
+		PluginType:         BUILDER_ID,
 		Interpolate:        true,
 		InterpolateContext: &b.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -29,19 +30,19 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 		return nil, nil, fmt.Errorf("[ERROR] Failed in decoding JSON->mapstructure")
 	}
 
-	errs := &packer.MultiError{}
-	errs = packer.MultiErrorAppend(errs, b.config.JDCloudCredentialConfig.Prepare(&b.config.ctx)...)
-	errs = packer.MultiErrorAppend(errs, b.config.JDCloudInstanceSpecConfig.Prepare(&b.config.ctx)...)
+	errs := &packersdk.MultiError{}
+	errs = packersdk.MultiErrorAppend(errs, b.config.JDCloudCredentialConfig.Prepare(&b.config.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, b.config.JDCloudInstanceSpecConfig.Prepare(&b.config.ctx)...)
 	if errs != nil && len(errs.Errors) != 0 {
 		return nil, nil, errs
 	}
 
-	packer.LogSecretFilter.Set(b.config.AccessKey, b.config.SecretKey)
+	packersdk.LogSecretFilter.Set(b.config.AccessKey, b.config.SecretKey)
 
 	return nil, nil, nil
 }
 
-func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (packer.Artifact, error) {
+func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook) (packersdk.Artifact, error) {
 
 	state := new(multistep.BasicStateBag)
 	state.Put("hook", hook)
@@ -69,7 +70,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			Host:      instanceHost,
 		},
 
-		&common.StepProvision{},
+		&commonsteps.StepProvision{},
 
 		&stepStopJDCloudInstance{
 			InstanceSpecConfig: &b.config.JDCloudInstanceSpecConfig,
@@ -80,7 +81,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 		},
 	}
 
-	b.runner = common.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
+	b.runner = commonsteps.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
 	b.runner.Run(ctx, state)
 
 	if rawErr, ok := state.GetOk("error"); ok {

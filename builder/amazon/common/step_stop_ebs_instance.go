@@ -6,9 +6,10 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/hashicorp/packer/common/retry"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
+	"github.com/hashicorp/packer/builder/amazon/common/awserrors"
 )
 
 type StepStopEBSBackedInstance struct {
@@ -20,7 +21,7 @@ type StepStopEBSBackedInstance struct {
 func (s *StepStopEBSBackedInstance) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	ec2conn := state.Get("ec2").(*ec2.EC2)
 	instance := state.Get("instance").(*ec2.Instance)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	// Skip when it is a spot instance
 	if s.Skip {
@@ -42,7 +43,7 @@ func (s *StepStopEBSBackedInstance) Run(ctx context.Context, state multistep.Sta
 
 		// Work around this by retrying a few times, up to about 5 minutes.
 		err := retry.Config{Tries: 6, ShouldRetry: func(error) bool {
-			if IsAWSErr(err, "InvalidInstanceID.NotFound", "") {
+			if awserrors.Matches(err, "InvalidInstanceID.NotFound", "") {
 				return true
 			}
 			return false

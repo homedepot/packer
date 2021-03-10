@@ -10,17 +10,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	vmwcommon "github.com/hashicorp/packer/builder/vmware/common"
 	vsphere "github.com/hashicorp/packer/builder/vsphere/common"
-	vspherepost "github.com/hashicorp/packer/post-processor/vsphere"
-
-	"github.com/hashicorp/hcl/v2/hcldec"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 	"github.com/hashicorp/packer/post-processor/artifice"
-	"github.com/hashicorp/packer/template/interpolate"
+	vspherepost "github.com/hashicorp/packer/post-processor/vsphere"
 	"github.com/vmware/govmomi"
 )
 
@@ -56,6 +56,7 @@ func (p *PostProcessor) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMap
 
 func (p *PostProcessor) Configure(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         vsphere.BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -67,7 +68,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		return err
 	}
 
-	errs := new(packer.MultiError)
+	errs := new(packersdk.MultiError)
 	vc := map[string]*string{
 		"host":     &p.config.Host,
 		"username": &p.config.Username,
@@ -76,19 +77,19 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 
 	for key, ptr := range vc {
 		if *ptr == "" {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("%s must be set", key))
 		}
 	}
 
 	if p.config.Folder != "" && !strings.HasPrefix(p.config.Folder, "/") {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("Folder must be bound to the root"))
 	}
 
 	sdk, err := url.Parse(fmt.Sprintf("https://%v/sdk", p.config.Host))
 	if err != nil {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("Error invalid vSphere sdk endpoint: %s", err))
 		return errs
 	}
@@ -102,7 +103,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	return nil
 }
 
-func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, bool, error) {
+func (p *PostProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, artifact packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
 	if _, ok := builtins[artifact.BuilderId()]; !ok {
 		return nil, false, false, fmt.Errorf("The Packer vSphere Template post-processor "+
 			"can only take an artifact from the VMware-iso builder, built on "+
@@ -143,7 +144,7 @@ func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact 
 		NewStepCreateSnapshot(artifact, p),
 		NewStepMarkAsTemplate(artifact, p),
 	}
-	runner := common.NewRunnerWithPauseFn(steps, p.config.PackerConfig, ui, state)
+	runner := commonsteps.NewRunnerWithPauseFn(steps, p.config.PackerConfig, ui, state)
 	runner.Run(ctx, state)
 	if rawErr, ok := state.GetOk("error"); ok {
 		return nil, false, false, rawErr.(error)

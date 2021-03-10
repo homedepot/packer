@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/azure/common"
 	"github.com/hashicorp/packer/builder/azure/common/constants"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 type StepCertificateInKeyVault struct {
@@ -17,7 +17,7 @@ type StepCertificateInKeyVault struct {
 	error  func(e error)
 }
 
-func NewStepCertificateInKeyVault(cli common.AZVaultClientIface, ui packer.Ui, config *Config) *StepCertificateInKeyVault {
+func NewStepCertificateInKeyVault(cli common.AZVaultClientIface, ui packersdk.Ui, config *Config) *StepCertificateInKeyVault {
 	var step = &StepCertificateInKeyVault{
 		client: cli,
 		config: config,

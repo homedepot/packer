@@ -10,9 +10,9 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-12-01/compute"
 	"github.com/Azure/go-autorest/autorest"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/azure/common/client"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 func TestStepCreateSnapshot_Run(t *testing.T) {
@@ -101,7 +101,7 @@ func TestStepCreateSnapshot_Run(t *testing.T) {
 		state.Put("azureclient", &client.AzureClientSetMock{
 			SnapshotsClientMock: m,
 		})
-		state.Put("ui", packer.TestUi(t))
+		state.Put("ui", packersdk.TestUi(t))
 		state.Put(stateBagKey_Diskset, tt.diskset)
 
 		t.Run(tt.name, func(t *testing.T) {
@@ -136,7 +136,7 @@ func TestStepCreateSnapshot_Cleanup_skipped(t *testing.T) {
 	state.Put("azureclient", &client.AzureClientSetMock{
 		SnapshotsClientMock: m,
 	})
-	state.Put("ui", packer.TestUi(t))
+	state.Put("ui", packersdk.TestUi(t))
 
 	s := &StepCreateSnapshotset{
 		SkipCleanup: true,
@@ -185,7 +185,7 @@ func TestStepCreateSnapshot_Cleanup(t *testing.T) {
 	state.Put("azureclient", &client.AzureClientSetMock{
 		SnapshotsClientMock: m,
 	})
-	state.Put("ui", packer.TestUi(t))
+	state.Put("ui", packersdk.TestUi(t))
 
 	s := &StepCreateSnapshotset{
 		SkipCleanup: false,

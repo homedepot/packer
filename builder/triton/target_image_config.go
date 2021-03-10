@@ -5,8 +5,8 @@ package triton
 import (
 	"fmt"
 
-	"github.com/hashicorp/packer/hcl2template"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 // TargetImageConfig represents the configuration for the image to be created
@@ -39,9 +39,9 @@ type TargetImageConfig struct {
 	ImageTags map[string]string `mapstructure:"image_tags" required:"false"`
 	// Same as [`image_tags`](#image_tags) but defined as a singular repeatable
 	// block containing a `name` and a `value` field. In HCL2 mode the
-	// [`dynamic_block`](/docs/configuration/from-1.5/expressions#dynamic-blocks)
+	// [`dynamic_block`](/docs/templates/hcl_templates/expressions#dynamic-blocks)
 	// will allow you to create those programatically.
-	ImageTag hcl2template.NameValues `mapstructure:"image_tag" required:"false"`
+	ImageTag config.NameValues `mapstructure:"image_tag" required:"false"`
 }
 
 // Prepare performs basic validation on a TargetImageConfig struct.

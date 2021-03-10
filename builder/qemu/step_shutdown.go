@@ -7,33 +7,37 @@ import (
 	"log"
 	"time"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // This step shuts down the machine. It first attempts to do so gracefully,
 // but ultimately forcefully shuts it down if that fails.
 //
 // Uses:
-//   communicator packer.Communicator
+//   communicator packersdk.Communicator
 //   config *config
 //   driver Driver
-//   ui     packer.Ui
+//   ui     packersdk.Ui
 //
 // Produces:
 //   <nothing>
-type stepShutdown struct{}
+type stepShutdown struct {
+	ShutdownCommand string
+	ShutdownTimeout time.Duration
+	Comm            *communicator.Config
+}
 
 func (s *stepShutdown) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
-	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
-	if state.Get("communicator") == nil {
+	if s.Comm.Type == "none" {
 		cancelCh := make(chan struct{}, 1)
 		go func() {
 			defer close(cancelCh)
-			<-time.After(config.ShutdownTimeout)
+			<-time.After(s.ShutdownTimeout)
 		}()
 		ui.Say("Waiting for shutdown...")
 		if ok := driver.WaitForShutdown(cancelCh); ok {
@@ -47,11 +51,11 @@ func (s *stepShutdown) Run(ctx context.Context, state multistep.StateBag) multis
 		}
 	}
 
-	comm := state.Get("communicator").(packer.Communicator)
-	if config.ShutdownCommand != "" {
+	if s.ShutdownCommand != "" {
+		comm := state.Get("communicator").(packersdk.Communicator)
 		ui.Say("Gracefully halting virtual machine...")
-		log.Printf("Executing shutdown command: %s", config.ShutdownCommand)
-		cmd := &packer.RemoteCmd{Command: config.ShutdownCommand}
+		log.Printf("Executing shutdown command: %s", s.ShutdownCommand)
+		cmd := &packersdk.RemoteCmd{Command: s.ShutdownCommand}
 		if err := cmd.RunWithUi(ctx, comm, ui); err != nil {
 			err := fmt.Errorf("Failed to send shutdown command: %s", err)
 			state.Put("error", err)
@@ -63,10 +67,10 @@ func (s *stepShutdown) Run(ctx context.Context, state multistep.StateBag) multis
 		cancelCh := make(chan struct{}, 1)
 		go func() {
 			defer close(cancelCh)
-			<-time.After(config.ShutdownTimeout)
+			<-time.After(s.ShutdownTimeout)
 		}()
 
-		log.Printf("Waiting max %s for shutdown to complete", config.ShutdownTimeout)
+		log.Printf("Waiting max %s for shutdown to complete", s.ShutdownTimeout)
 		if ok := driver.WaitForShutdown(cancelCh); !ok {
 			err := errors.New("Timeout while waiting for machine to shut down.")
 			state.Put("error", err)

@@ -6,9 +6,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/hashicorp/packer/common/retry"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
 )
 
 // This step removes any devices (floppy disks, ISOs, etc.) from the
@@ -16,18 +16,17 @@ import (
 //
 // Uses:
 //   driver Driver
-//   ui packer.Ui
+//   ui packersdk.Ui
 //   vmName string
 //
 // Produces:
 type StepRemoveDevices struct {
-	Bundling                VBoxBundleConfig
-	GuestAdditionsInterface string
+	Bundling VBoxBundleConfig
 }
 
 func (s *StepRemoveDevices) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmName := state.Get("vmName").(string)
 
 	// Remove the attached floppy disk, if it exists
@@ -73,58 +72,32 @@ func (s *StepRemoveDevices) Run(ctx context.Context, state multistep.StateBag) m
 		}
 	}
 
-	if !s.Bundling.BundleISO {
-		if _, ok := state.GetOk("attachedIso"); ok {
-			controllerName := "IDE Controller"
-			port := "0"
-			device := "1"
-			if _, ok := state.GetOk("attachedIsoOnSata"); ok {
-				controllerName = "SATA Controller"
-				port = "1"
-				device = "0"
-			}
-
-			command := []string{
-				"storageattach", vmName,
-				"--storagectl", controllerName,
-				"--port", port,
-				"--device", device,
-				"--medium", "none",
-			}
-
-			if err := driver.VBoxManage(command...); err != nil {
-				err := fmt.Errorf("Error detaching ISO: %s", err)
-				state.Put("error", err)
-				ui.Error(err.Error())
-				return multistep.ActionHalt
-			}
-		}
+	var isoUnmountCommands map[string][]string
+	isoUnmountCommandsRaw, ok := state.GetOk("disk_unmount_commands")
+	if !ok {
+		// No disks to unmount
+		return multistep.ActionContinue
+	} else {
+		isoUnmountCommands = isoUnmountCommandsRaw.(map[string][]string)
 	}
 
-	if _, ok := state.GetOk("guest_additions_attached"); ok {
-		ui.Message("Removing guest additions drive...")
-		controllerName := "IDE Controller"
-		port := "1"
-		device := "0"
-		if s.GuestAdditionsInterface == "sata" {
-			controllerName = "SATA Controller"
-			port = "2"
-			device = "0"
+	for diskCategory, unmountCommand := range isoUnmountCommands {
+		if diskCategory == "boot_iso" && s.Bundling.BundleISO {
+			// skip the unmount if user wants to bundle the iso
+			continue
 		}
-		command := []string{
-			"storageattach", vmName,
-			"--storagectl", controllerName,
-			"--port", port,
-			"--device", device,
-			"--medium", "none",
-		}
-		if err := driver.VBoxManage(command...); err != nil {
-			err := fmt.Errorf("Error removing guest additions: %s", err)
+
+		if err := driver.VBoxManage(unmountCommand...); err != nil {
+			err := fmt.Errorf("Error detaching ISO: %s", err)
 			state.Put("error", err)
 			ui.Error(err.Error())
 			return multistep.ActionHalt
 		}
 	}
+
+	// log that we removed the isos, so we don't waste time trying to do it
+	// in the step_attach_isos cleanup.
+	state.Put("detached_isos", true)
 
 	return multistep.ActionContinue
 }

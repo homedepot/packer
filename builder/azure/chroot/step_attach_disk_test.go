@@ -11,9 +11,9 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-12-01/compute"
 	"github.com/Azure/go-autorest/autorest"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/azure/common/client"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 func TestStepAttachDisk_Run(t *testing.T) {
@@ -69,7 +69,7 @@ func TestStepAttachDisk_Run(t *testing.T) {
 			})
 
 			errorBuffer := &strings.Builder{}
-			ui := &packer.BasicUi{
+			ui := &packersdk.BasicUi{
 				Reader:      strings.NewReader(""),
 				Writer:      ioutil.Discard,
 				ErrorWriter: errorBuffer,

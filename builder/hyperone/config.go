@@ -10,15 +10,14 @@ import (
 	"os"
 	"time"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/common/json"
-	"github.com/hashicorp/packer/common/uuid"
-	"github.com/hashicorp/packer/hcl2template"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/json"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/uuid"
 	"github.com/mitchellh/go-homedir"
 	"github.com/mitchellh/mapstructure"
 )
@@ -65,9 +64,9 @@ type Config struct {
 	ImageTags map[string]string `mapstructure:"image_tags" required:"false"`
 	// Same as [`image_tags`](#image_tags) but defined as a singular repeatable
 	// block containing a `key` and a `value` field. In HCL2 mode the
-	// [`dynamic_block`](/docs/configuration/from-1.5/expressions#dynamic-blocks)
+	// [`dynamic_block`](/docs/templates/hcl_templates/expressions#dynamic-blocks)
 	// will allow you to create those programatically.
-	ImageTag hcl2template.KeyValues `mapstructure:"image_tag" required:"false"`
+	ImageTag config.KeyValues `mapstructure:"image_tag" required:"false"`
 	// The service of the resulting image.
 	ImageService string `mapstructure:"image_service" required:"false"`
 	// ID or name of the type this server should be created with.
@@ -78,9 +77,9 @@ type Config struct {
 	VmTags map[string]string `mapstructure:"vm_tags" required:"false"`
 	// Same as [`vm_tags`](#vm_tags) but defined as a singular repeatable block
 	// containing a `key` and a `value` field. In HCL2 mode the
-	// [`dynamic_block`](/docs/configuration/from-1.5/expressions#dynamic-blocks)
+	// [`dynamic_block`](/docs/templates/hcl_templates/expressions#dynamic-blocks)
 	// will allow you to create those programatically.
-	VmTag hcl2template.NameValues `mapstructure:"vm_tag" required:"false"`
+	VmTag config.NameValues `mapstructure:"vm_tag" required:"false"`
 	// The name of the created disk.
 	DiskName string `mapstructure:"disk_name" required:"false"`
 	// The type of the created disk. Defaults to ssd.
@@ -266,39 +265,39 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 	}
 
 	// Validation
-	var errs *packer.MultiError
-	errs = packer.MultiErrorAppend(errs, c.ImageTag.CopyOn(&c.ImageTags)...)
-	errs = packer.MultiErrorAppend(errs, c.VmTag.CopyOn(&c.VmTags)...)
+	var errs *packersdk.MultiError
+	errs = packersdk.MultiErrorAppend(errs, c.ImageTag.CopyOn(&c.ImageTags)...)
+	errs = packersdk.MultiErrorAppend(errs, c.VmTag.CopyOn(&c.VmTags)...)
 
 	if es := c.Comm.Prepare(&c.ctx); len(es) > 0 {
-		errs = packer.MultiErrorAppend(errs, es...)
+		errs = packersdk.MultiErrorAppend(errs, es...)
 	}
 
 	if c.Token == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("token is required"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("token is required"))
 	}
 
 	if c.VmType == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("vm type is required"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("vm type is required"))
 	}
 
 	if c.DiskSize == 0 {
-		errs = packer.MultiErrorAppend(errs, errors.New("disk size is required"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("disk size is required"))
 	}
 
 	if c.SourceImage == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("source image is required"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("source image is required"))
 	}
 
 	if c.ChrootDisk {
 		if len(c.PreMountCommands) == 0 {
-			errs = packer.MultiErrorAppend(errs, errors.New("pre-mount commands are required for chroot disk"))
+			errs = packersdk.MultiErrorAppend(errs, errors.New("pre-mount commands are required for chroot disk"))
 		}
 	}
 
 	for _, mounts := range c.ChrootMounts {
 		if len(mounts) != 3 {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("each chroot_mounts entry should have three elements"))
 			break
 		}
@@ -308,7 +307,7 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 		return nil, errs
 	}
 
-	packer.LogSecretFilter.Set(c.Token)
+	packersdk.LogSecretFilter.Set(c.Token)
 
 	return nil, nil
 }

@@ -8,10 +8,10 @@ import (
 	"io/ioutil"
 	"net"
 
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
 	"github.com/hashicorp/packer/builder/vsphere/driver"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 	"github.com/vmware/govmomi/vim25/types"
 )
 
@@ -123,8 +123,8 @@ func (c *CustomizeConfig) Prepare() []error {
 }
 
 func (s *StepCustomize) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
-	vm := state.Get("vm").(*driver.VirtualMachine)
-	ui := state.Get("ui").(packer.Ui)
+	vm := state.Get("vm").(*driver.VirtualMachineDriver)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	identity, err := s.identitySettings()
 	if err != nil {

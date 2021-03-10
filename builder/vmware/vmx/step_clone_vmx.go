@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"regexp"
 
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/tmp"
 	vmwcommon "github.com/hashicorp/packer/builder/vmware/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/packer/tmp"
 )
 
 // StepCloneVMX takes a VMX file and clones the VM into the output directory.
@@ -20,6 +20,7 @@ type StepCloneVMX struct {
 	Path      string
 	VMName    string
 	Linked    bool
+	Snapshot  string
 	tempDir   string
 }
 
@@ -30,7 +31,7 @@ func (s *StepCloneVMX) Run(ctx context.Context, state multistep.StateBag) multis
 	}
 
 	driver := state.Get("driver").(vmwcommon.Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	// Set the path we want for the new .vmx file and clone
 	vmxPath := filepath.Join(*s.OutputDir, s.VMName+".vmx")
@@ -38,7 +39,7 @@ func (s *StepCloneVMX) Run(ctx context.Context, state multistep.StateBag) multis
 	log.Printf("Cloning from: %s", s.Path)
 	log.Printf("Cloning to: %s", vmxPath)
 
-	if err := driver.Clone(vmxPath, s.Path, s.Linked); err != nil {
+	if err := driver.Clone(vmxPath, s.Path, s.Linked, s.Snapshot); err != nil {
 		return halt(err)
 	}
 

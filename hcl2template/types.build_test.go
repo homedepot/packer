@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	. "github.com/hashicorp/packer/hcl2template/internal"
 	"github.com/hashicorp/packer/packer"
 )
@@ -16,15 +17,20 @@ func TestParse_build(t *testing.T) {
 			defaultParser,
 			parseTestArgs{"testdata/build/basic.pkr.hcl", nil, nil},
 			&PackerConfig{
-				Basedir: filepath.Join("testdata", "build"),
+				CorePackerVersionString: lockedVersion,
+				Basedir:                 filepath.Join("testdata", "build"),
 				Builds: Builds{
 					&BuildBlock{
-						Sources: []SourceRef{
+						Sources: []SourceUseBlock{
 							{
-								Type: "amazon-ebs",
-								Name: "ubuntu-1604",
+								SourceRef: SourceRef{
+									Type: "amazon-ebs",
+									Name: "ubuntu-1604",
+								},
 							},
-							refVBIsoUbuntu1204,
+							{
+								SourceRef: refVBIsoUbuntu1204,
+							},
 						},
 						ProvisionerBlocks: []*ProvisionerBlock{
 							{
@@ -44,16 +50,17 @@ func TestParse_build(t *testing.T) {
 					},
 				},
 			},
-			false, false,
-			[]packer.Build{},
+			true, true,
+			[]packersdk.Build{},
 			true,
 		},
 		{"untyped provisioner",
 			defaultParser,
 			parseTestArgs{"testdata/build/provisioner_untyped.pkr.hcl", nil, nil},
 			&PackerConfig{
-				Basedir: filepath.Join("testdata", "build"),
-				Builds:  nil,
+				CorePackerVersionString: lockedVersion,
+				Basedir:                 filepath.Join("testdata", "build"),
+				Builds:                  nil,
 			},
 			true, true,
 			nil,
@@ -63,82 +70,146 @@ func TestParse_build(t *testing.T) {
 			defaultParser,
 			parseTestArgs{"testdata/build/provisioner_inexistent.pkr.hcl", nil, nil},
 			&PackerConfig{
-				Basedir: filepath.Join("testdata", "build"),
-				Builds:  nil,
+				CorePackerVersionString: lockedVersion,
+				Basedir:                 filepath.Join("testdata", "build"),
+				Builds: Builds{
+					&BuildBlock{
+						ProvisionerBlocks: []*ProvisionerBlock{
+							{
+								PType: "inexistant",
+							},
+						},
+					},
+				},
 			},
 			true, true,
-			[]packer.Build{&packer.CoreBuild{}},
+			[]packersdk.Build{&packer.CoreBuild{
+				Provisioners: []packer.CoreBuildProvisioner{},
+			}},
+			false,
+		},
+		{"two error-cleanup-provisioner",
+			defaultParser,
+			parseTestArgs{"testdata/build/two-error-cleanup-provisioner.pkr.hcl", nil, nil},
+			&PackerConfig{
+				CorePackerVersionString: lockedVersion,
+				Basedir:                 filepath.Join("testdata", "build"),
+				Sources: map[SourceRef]SourceBlock{
+					refVBIsoUbuntu1204: {Type: "virtualbox-iso", Name: "ubuntu-1204"},
+				},
+			},
+			true, true,
+			[]packersdk.Build{&packer.CoreBuild{
+				Builder: emptyMockBuilder,
+				CleanupProvisioner: packer.CoreBuildProvisioner{
+					PType: "shell-local",
+					Provisioner: &HCL2Provisioner{
+						Provisioner: &MockProvisioner{
+							Config: MockConfig{
+								NestedMockConfig: NestedMockConfig{Tags: []MockTag{}},
+								NestedSlice:      []NestedMockConfig{},
+							},
+						},
+					},
+				},
+			}},
 			false,
 		},
 		{"untyped post-processor",
 			defaultParser,
 			parseTestArgs{"testdata/build/post-processor_untyped.pkr.hcl", nil, nil},
 			&PackerConfig{
-				Basedir: filepath.Join("testdata", "build"),
-				Builds:  nil,
+				CorePackerVersionString: lockedVersion,
+				Basedir:                 filepath.Join("testdata", "build"),
+				Builds:                  nil,
 			},
 			true, true,
-			[]packer.Build{&packer.CoreBuild{}},
+			[]packersdk.Build{&packer.CoreBuild{}},
 			false,
 		},
 		{"inexistent post-processor",
 			defaultParser,
 			parseTestArgs{"testdata/build/post-processor_inexistent.pkr.hcl", nil, nil},
 			&PackerConfig{
-				Basedir: filepath.Join("testdata", "build"),
-				Builds:  nil,
+				CorePackerVersionString: lockedVersion,
+				Basedir:                 filepath.Join("testdata", "build"),
+				Builds: Builds{
+					&BuildBlock{
+						PostProcessorsLists: [][]*PostProcessorBlock{
+							{
+								{
+									PType: "inexistant",
+								},
+							},
+						},
+					},
+				},
 			},
 			true, true,
-			[]packer.Build{},
-			false,
+			[]packersdk.Build{&packer.CoreBuild{
+				PostProcessors: [][]packer.CoreBuildPostProcessor{},
+			}},
+			true,
 		},
 		{"invalid source",
 			defaultParser,
 			parseTestArgs{"testdata/build/invalid_source_reference.pkr.hcl", nil, nil},
 			&PackerConfig{
-				Basedir: filepath.Join("testdata", "build"),
-				Builds:  nil,
+				CorePackerVersionString: lockedVersion,
+				Basedir:                 filepath.Join("testdata", "build"),
+				Builds:                  nil,
 			},
 			true, true,
-			[]packer.Build{},
+			[]packersdk.Build{},
 			false,
 		},
 		{"named build",
 			defaultParser,
 			parseTestArgs{"testdata/build/named.pkr.hcl", nil, nil},
 			&PackerConfig{
-				Basedir: filepath.Join("testdata", "build"),
+				CorePackerVersionString: lockedVersion,
+				Basedir:                 filepath.Join("testdata", "build"),
 				Builds: Builds{
 					&BuildBlock{
 						Name: "somebuild",
-						Sources: []SourceRef{
+						Sources: []SourceUseBlock{
 							{
-								Type: "amazon-ebs",
-								Name: "ubuntu-1604",
+								SourceRef: SourceRef{
+									Type: "amazon-ebs",
+									Name: "ubuntu-1604",
+								},
 							},
-							refVBIsoUbuntu1204,
+							{
+								SourceRef: refVBIsoUbuntu1204,
+							},
 						},
 					},
 				},
 			},
-			false, false,
-			[]packer.Build{},
+			true, true,
+			[]packersdk.Build{},
 			true,
 		},
 		{"post-processor with only and except",
 			defaultParser,
 			parseTestArgs{"testdata/build/post-processor_onlyexcept.pkr.hcl", nil, nil},
 			&PackerConfig{
-				Basedir: filepath.Join("testdata", "build"),
+				CorePackerVersionString: lockedVersion,
+				Basedir:                 filepath.Join("testdata", "build"),
 				Sources: map[SourceRef]SourceBlock{
 					refVBIsoUbuntu1204:  {Type: "virtualbox-iso", Name: "ubuntu-1204"},
 					refAWSEBSUbuntu1604: {Type: "amazon-ebs", Name: "ubuntu-1604"},
 				},
 				Builds: Builds{
 					&BuildBlock{
-						Sources: []SourceRef{
-							refVBIsoUbuntu1204,
-							SourceRef{Type: "amazon-ebs", Name: "ubuntu-1604", LocalName: "aws-ubuntu-16.04"},
+						Sources: []SourceUseBlock{
+							{
+								SourceRef: refVBIsoUbuntu1204,
+							},
+							{
+								SourceRef: SourceRef{Type: "amazon-ebs", Name: "ubuntu-1604"},
+								LocalName: "aws-ubuntu-16.04",
+							},
 						},
 						ProvisionerBlocks: nil,
 						PostProcessorsLists: [][]*PostProcessorBlock{
@@ -171,7 +242,7 @@ func TestParse_build(t *testing.T) {
 				},
 			},
 			false, false,
-			[]packer.Build{
+			[]packersdk.Build{
 				&packer.CoreBuild{
 					Type:         "virtualbox-iso.ubuntu-1204",
 					Prepared:     true,
@@ -247,16 +318,22 @@ func TestParse_build(t *testing.T) {
 			defaultParser,
 			parseTestArgs{"testdata/build/provisioner_onlyexcept.pkr.hcl", nil, nil},
 			&PackerConfig{
-				Basedir: filepath.Join("testdata", "build"),
+				CorePackerVersionString: lockedVersion,
+				Basedir:                 filepath.Join("testdata", "build"),
 				Sources: map[SourceRef]SourceBlock{
 					refVBIsoUbuntu1204:  {Type: "virtualbox-iso", Name: "ubuntu-1204"},
 					refAWSEBSUbuntu1604: {Type: "amazon-ebs", Name: "ubuntu-1604"},
 				},
 				Builds: Builds{
 					&BuildBlock{
-						Sources: []SourceRef{
-							refVBIsoUbuntu1204,
-							SourceRef{Type: "amazon-ebs", Name: "ubuntu-1604", LocalName: "aws-ubuntu-16.04"},
+						Sources: []SourceUseBlock{
+							{
+								SourceRef: refVBIsoUbuntu1204,
+							},
+							{
+								SourceRef: SourceRef{Type: "amazon-ebs", Name: "ubuntu-1604"},
+								LocalName: "aws-ubuntu-16.04",
+							},
 						},
 						ProvisionerBlocks: []*ProvisionerBlock{
 							{
@@ -280,7 +357,7 @@ func TestParse_build(t *testing.T) {
 				},
 			},
 			false, false,
-			[]packer.Build{
+			[]packersdk.Build{
 				&packer.CoreBuild{
 					Type:     "virtualbox-iso.ubuntu-1204",
 					Prepared: true,

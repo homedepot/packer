@@ -56,7 +56,9 @@ func (c *ValidateCommand) RunContext(ctx context.Context, cla *ValidateArgs) int
 		return 0
 	}
 
-	diags := packerStarter.Initialize()
+	diags := packerStarter.Initialize(packer.InitializeOptions{
+		SkipDatasourcesExecution: true,
+	})
 	ret = writeDiags(c.Ui, nil, diags)
 	if ret != 0 {
 		return ret
@@ -90,9 +92,10 @@ Options:
 
   -syntax-only           Only check syntax. Do not verify config of the template.
   -except=foo,bar,baz    Validate all builds other than these.
+  -machine-readable      Produce machine-readable output.
   -only=foo,bar,baz      Validate only these builds.
   -var 'key=value'       Variable for templates, can be used multiple times.
-  -var-file=path         JSON file containing user variables. [ Note that even in HCL mode this expects file to contain JSON, a fix is comming soon ]
+  -var-file=path         JSON or HCL2 file containing user variables.
 `
 
 	return strings.TrimSpace(helpText)
@@ -108,10 +111,11 @@ func (*ValidateCommand) AutocompleteArgs() complete.Predictor {
 
 func (*ValidateCommand) AutocompleteFlags() complete.Flags {
 	return complete.Flags{
-		"-syntax-only": complete.PredictNothing,
-		"-except":      complete.PredictNothing,
-		"-only":        complete.PredictNothing,
-		"-var":         complete.PredictNothing,
-		"-var-file":    complete.PredictNothing,
+		"-syntax-only":      complete.PredictNothing,
+		"-except":           complete.PredictNothing,
+		"-only":             complete.PredictNothing,
+		"-var":              complete.PredictNothing,
+		"-machine-readable": complete.PredictNothing,
+		"-var-file":         complete.PredictNothing,
 	}
 }

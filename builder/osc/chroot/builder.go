@@ -8,19 +8,17 @@ package chroot
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
-	"net/http"
 	"runtime"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	osccommon "github.com/hashicorp/packer/builder/osc/common"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
-	"github.com/outscale/osc-go/oapi"
 )
 
 // The unique ID for this builder
@@ -69,6 +67,7 @@ func (b *Builder) ConfigSpec() hcldec.ObjectSpec { return b.config.FlatMapstruct
 func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	b.config.ctx.Funcs = osccommon.TemplateFuncs
 	err := config.Decode(&b.config, &config.DecodeOpts{
+		PluginType:         BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &b.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -128,16 +127,16 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	}
 
 	// Accumulate any errors or warnings
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 	var warns []string
 
-	errs = packer.MultiErrorAppend(errs, b.config.AccessConfig.Prepare(&b.config.ctx)...)
-	errs = packer.MultiErrorAppend(errs,
+	errs = packersdk.MultiErrorAppend(errs, b.config.AccessConfig.Prepare(&b.config.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs,
 		b.config.OMIConfig.Prepare(&b.config.AccessConfig, &b.config.ctx)...)
 
 	for _, mounts := range b.config.ChrootMounts {
 		if len(mounts) != 3 {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("Each chroot_mounts entry should be three elements."))
 			break
 		}
@@ -148,28 +147,28 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 			warns = append(warns, "source_omi and source_omi_filter are unused when from_scratch is true")
 		}
 		if b.config.RootVolumeSize == 0 {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("root_volume_size is required with from_scratch."))
 		}
 		if len(b.config.PreMountCommands) == 0 {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("pre_mount_commands is required with from_scratch."))
 		}
 		if b.config.OMIVirtType == "" {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("omi_virtualization_type is required with from_scratch."))
 		}
 		if b.config.RootDeviceName == "" {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("root_device_name is required with from_scratch."))
 		}
 		if len(b.config.OMIMappings) == 0 {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("omi_block_device_mappings is required with from_scratch."))
 		}
 	} else {
 		if b.config.SourceOMI == "" && b.config.SourceOMIFilter.Empty() {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("source_omi or source_omi_filter is required."))
 		}
 		if len(b.config.OMIMappings) != 0 {
@@ -184,28 +183,16 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 		return nil, warns, errs
 	}
 
-	packer.LogSecretFilter.Set(b.config.AccessKey, b.config.SecretKey, b.config.Token)
+	packersdk.LogSecretFilter.Set(b.config.AccessKey, b.config.SecretKey, b.config.Token)
 	return nil, warns, nil
 }
 
-func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (packer.Artifact, error) {
+func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook) (packersdk.Artifact, error) {
 	if runtime.GOOS != "linux" {
 		return nil, errors.New("The outscale-chroot builder only works on Linux environments.")
 	}
 
-	clientConfig, err := b.config.Config()
-	if err != nil {
-		return nil, err
-	}
-
-	skipClient := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-
-	oapiconn := oapi.NewClient(clientConfig, skipClient)
-
+	oscConn := b.config.NewOSCClient()
 	wrappedCommand := func(command string) (string, error) {
 		ctx := b.config.ctx
 		ctx.Data = &wrappedCommandTemplate{Command: command}
@@ -215,8 +202,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 	// Setup the state bag and initial state for the steps
 	state := new(multistep.BasicStateBag)
 	state.Put("config", &b.config)
-	state.Put("oapi", oapiconn)
-	state.Put("clientConfig", clientConfig)
+	state.Put("osc", oscConn)
 	state.Put("hook", hook)
 	state.Put("ui", ui)
 	state.Put("wrappedCommand", CommandWrapper(wrappedCommand))
@@ -266,7 +252,9 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 		&StepCopyFiles{},
 		&StepChrootProvision{},
 		&StepEarlyCleanup{},
-		&StepSnapshot{},
+		&StepSnapshot{
+			RawRegion: b.config.RawRegion,
+		},
 		&osccommon.StepDeregisterOMI{
 			AccessConfig:        &b.config.AccessConfig,
 			ForceDeregister:     b.config.OMIForceDeregister,
@@ -276,6 +264,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 		},
 		&StepCreateOMI{
 			RootVolumeSize: b.config.RootVolumeSize,
+			RawRegion:      b.config.RawRegion,
 		},
 		&osccommon.StepUpdateOMIAttributes{
 			AccountIds:         b.config.OMIAccountIDs,
@@ -290,7 +279,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 	)
 
 	// Run!
-	b.runner = common.NewRunner(steps, b.config.PackerConfig, ui)
+	b.runner = commonsteps.NewRunner(steps, b.config.PackerConfig, ui)
 	b.runner.Run(ctx, state)
 
 	// If there was an error, return that
@@ -307,7 +296,6 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 	artifact := &osccommon.Artifact{
 		Omis:           state.Get("omis").(map[string]string),
 		BuilderIdValue: BuilderId,
-		Config:         clientConfig,
 		StateData:      map[string]interface{}{"generated_data": state.Get("generated_data")},
 	}
 

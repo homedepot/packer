@@ -18,10 +18,10 @@ import (
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ram"
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 	"github.com/hashicorp/hcl/v2/hcldec"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	packerecs "github.com/hashicorp/packer/builder/alicloud/ecs"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
 )
 
 const (
@@ -64,8 +64,8 @@ type Config struct {
 	OSSBucket string `mapstructure:"oss_bucket_name" required:"true"`
 	// The name of the object key in `oss_bucket_name` where the RAW or VHD
 	// file will be copied to for import. This is treated as a [template
-	// engine](/docs/templates/engine), and you may access any of the variables
-	// stored in the generated data using the [build](/docs/templates/engine)
+	// engine](/docs/templates/legacy_json_templates/engine), and you may access any of the variables
+	// stored in the generated data using the [build](/docs/templates/legacy_json_templates/engine)
 	// template function.
 	OSSKey string `mapstructure:"oss_key_name"`
 	// Whether we should skip removing the RAW or VHD file uploaded to OSS
@@ -116,6 +116,7 @@ func (p *PostProcessor) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMap
 
 func (p *PostProcessor) Configure(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -128,18 +129,18 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		return err
 	}
 
-	errs := new(packer.MultiError)
+	errs := new(packersdk.MultiError)
 
 	// Check and render oss_key_name
 	if err = interpolate.Validate(p.config.OSSKey, &p.config.ctx); err != nil {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("Error parsing oss_key_name template: %s", err))
 	}
 
-	errs = packer.MultiErrorAppend(errs, p.config.AlicloudImageTag.CopyOn(&p.config.AlicloudImageTags)...)
+	errs = packersdk.MultiErrorAppend(errs, p.config.AlicloudImageTag.CopyOn(&p.config.AlicloudImageTags)...)
 
 	// Check we have alicloud access variables defined somewhere
-	errs = packer.MultiErrorAppend(errs, p.config.AlicloudAccessConfig.Prepare(&p.config.ctx)...)
+	errs = packersdk.MultiErrorAppend(errs, p.config.AlicloudAccessConfig.Prepare(&p.config.ctx)...)
 
 	// define all our required parameters
 	templates := map[string]*string{
@@ -148,7 +149,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	// Check out required params are defined
 	for key, ptr := range templates {
 		if *ptr == "" {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("%s must be set", key))
 		}
 	}
@@ -158,12 +159,12 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		return errs
 	}
 
-	packer.LogSecretFilter.Set(p.config.AlicloudAccessKey, p.config.AlicloudSecretKey)
+	packersdk.LogSecretFilter.Set(p.config.AlicloudAccessKey, p.config.AlicloudSecretKey)
 	log.Println(p.config)
 	return nil
 }
 
-func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, bool, error) {
+func (p *PostProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, artifact packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
 	var err error
 
 	generatedData := artifact.State("generated_data")

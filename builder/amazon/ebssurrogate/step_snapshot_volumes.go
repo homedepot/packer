@@ -6,11 +6,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	multierror "github.com/hashicorp/go-multierror"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	awscommon "github.com/hashicorp/packer/builder/amazon/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 // StepSnapshotVolumes creates snapshots of the created volumes.
@@ -23,11 +25,13 @@ type StepSnapshotVolumes struct {
 	snapshotIds     map[string]string
 	snapshotMutex   sync.Mutex
 	SnapshotOmitMap map[string]bool
+	SnapshotTags    map[string]string
+	Ctx             interpolate.Context
 }
 
 func (s *StepSnapshotVolumes) snapshotVolume(ctx context.Context, deviceName string, state multistep.StateBag) error {
 	ec2conn := state.Get("ec2").(*ec2.EC2)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	instance := state.Get("instance").(*ec2.Instance)
 
 	var volumeId string
@@ -40,12 +44,34 @@ func (s *StepSnapshotVolumes) snapshotVolume(ctx context.Context, deviceName str
 		return fmt.Errorf("Volume ID for device %s not found", deviceName)
 	}
 
+	ui.Say("Creating snapshot tags")
+	snapshotTags, err := awscommon.TagMap(s.SnapshotTags).EC2Tags(s.Ctx, *ec2conn.Config.Region, state)
+	if err != nil {
+		state.Put("error", err)
+		ui.Error(err.Error())
+		return err
+	}
+	snapshotTags.Report(ui)
+
 	ui.Say(fmt.Sprintf("Creating snapshot of EBS Volume %s...", volumeId))
 	description := fmt.Sprintf("Packer: %s", time.Now().String())
 
+	// Collect tags for tagging on resource creation
+	var tagSpecs []*ec2.TagSpecification
+
+	if len(snapshotTags) > 0 {
+		snapTags := &ec2.TagSpecification{
+			ResourceType: aws.String("snapshot"),
+			Tags:         snapshotTags,
+		}
+
+		tagSpecs = append(tagSpecs, snapTags)
+	}
+
 	createSnapResp, err := ec2conn.CreateSnapshot(&ec2.CreateSnapshotInput{
-		VolumeId:    &volumeId,
-		Description: &description,
+		VolumeId:          &volumeId,
+		Description:       &description,
+		TagSpecifications: tagSpecs,
 	})
 	if err != nil {
 		return err
@@ -62,7 +88,7 @@ func (s *StepSnapshotVolumes) snapshotVolume(ctx context.Context, deviceName str
 }
 
 func (s *StepSnapshotVolumes) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	s.snapshotIds = map[string]string{}
 
@@ -106,7 +132,7 @@ func (s *StepSnapshotVolumes) Cleanup(state multistep.StateBag) {
 
 	if cancelled || halted {
 		ec2conn := state.Get("ec2").(*ec2.EC2)
-		ui := state.Get("ui").(packer.Ui)
+		ui := state.Get("ui").(packersdk.Ui)
 		ui.Say("Removing snapshots since we cancelled or halted...")
 		s.snapshotMutex.Lock()
 		for _, snapshotId := range s.snapshotIds {

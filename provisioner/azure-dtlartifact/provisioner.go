@@ -12,11 +12,11 @@ import (
 	"github.com/hashicorp/packer/builder/azure/common/client"
 	dtlBuilder "github.com/hashicorp/packer/builder/azure/dtl"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 type DtlArtifact struct {
@@ -62,7 +62,7 @@ type Config struct {
 
 type Provisioner struct {
 	config       Config
-	communicator packer.Communicator
+	communicator packersdk.Communicator
 }
 
 func (p *Provisioner) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMapstructure().HCL2Spec() }
@@ -74,6 +74,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 	// 	WinRMPassword: `{{.WinRMPassword}}`,
 	// }
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         "azure-dtlartifact",
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -91,11 +92,11 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 	return nil
 }
 
-func (p *Provisioner) Communicator() packer.Communicator {
+func (p *Provisioner) Communicator() packersdk.Communicator {
 	return p.communicator
 }
 
-func (p *Provisioner) Provision(ctx context.Context, ui packer.Ui, comm packer.Communicator, _ map[string]interface{}) error {
+func (p *Provisioner) Provision(ctx context.Context, ui packersdk.Ui, comm packersdk.Communicator, _ map[string]interface{}) error {
 
 	p.communicator = comm
 

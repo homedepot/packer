@@ -5,9 +5,9 @@ import (
 	"net"
 	"testing"
 
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
 )
 
 func TestESX5Driver_implDriver(t *testing.T) {
@@ -90,5 +90,15 @@ func TestESX5Driver_CommHost(t *testing.T) {
 	}
 	if address.(string) != expected_host {
 		t.Errorf("bad vm_address: %s", address.(string))
+	}
+}
+
+func TestESX5Driver_VerifyOvfTool(t *testing.T) {
+	driver := ESX5Driver{}
+	// should always skip validation if export is skipped, so this should always
+	// pass even when ovftool is not installed.
+	err := driver.VerifyOvfTool(true, false)
+	if err != nil {
+		t.Fatalf("shouldn't fail ever because should always skip check")
 	}
 }

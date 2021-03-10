@@ -1,6 +1,6 @@
 //go:generate mapstructure-to-hcl2 -type Config
 
-// vagrant_cloud implements the packer.PostProcessor interface and adds a
+// vagrant_cloud implements the packersdk.PostProcessor interface and adds a
 // post-processor that uploads artifacts from the vagrant post-processor
 // and vagrant builder to Vagrant Cloud (vagrantcloud.com) or manages
 // self hosted boxes on the Vagrant Cloud
@@ -19,11 +19,12 @@ import (
 	"strings"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 var builtins = map[string]string{
@@ -45,8 +46,8 @@ type Config struct {
 	AccessToken           string `mapstructure:"access_token"`
 	VagrantCloudUrl       string `mapstructure:"vagrant_cloud_url"`
 	InsecureSkipTLSVerify bool   `mapstructure:"insecure_skip_tls_verify"`
-
-	BoxDownloadUrl string `mapstructure:"box_download_url"`
+	BoxDownloadUrl        string `mapstructure:"box_download_url"`
+	NoDirectUpload        bool   `mapstructure:"no_direct_upload"`
 
 	ctx interpolate.Context
 }
@@ -63,6 +64,7 @@ func (p *PostProcessor) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMap
 
 func (p *PostProcessor) Configure(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -94,7 +96,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	}
 
 	// Accumulate any errors
-	errs := new(packer.MultiError)
+	errs := new(packersdk.MultiError)
 
 	// Required configuration
 	templates := map[string]*string{
@@ -104,19 +106,19 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 
 	for key, ptr := range templates {
 		if *ptr == "" {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("%s must be set", key))
 		}
 	}
 
 	if p.config.VagrantCloudUrl == VAGRANT_CLOUD_URL && p.config.AccessToken == "" {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("access_token must be set if vagrant_cloud_url has not been overriden"))
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("access_token must be set if vagrant_cloud_url has not been overriden"))
 	}
 
 	// Create the HTTP client
 	p.client, err = VagrantCloudClient{}.New(p.config.VagrantCloudUrl, p.config.AccessToken, p.insecureSkipTLSVerify)
 	if err != nil {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("Failed to verify authentication token: %v", err))
 	}
 
@@ -127,7 +129,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	return nil
 }
 
-func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, bool, error) {
+func (p *PostProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, artifact packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
 	if _, ok := builtins[artifact.BuilderId()]; !ok {
 		return nil, false, false, fmt.Errorf(
 			"Unknown artifact type: this post-processor requires an input artifact from the artifice post-processor, vagrant post-processor, or vagrant builder: %s", artifact.BuilderId())
@@ -180,27 +182,21 @@ func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact 
 	state.Put("boxDownloadUrl", boxDownloadUrl)
 
 	// Build the steps
-	steps := []multistep.Step{}
+	steps := []multistep.Step{
+		new(stepVerifyBox),
+		new(stepCreateVersion),
+		new(stepCreateProvider),
+	}
 	if p.config.BoxDownloadUrl == "" {
-		steps = []multistep.Step{
-			new(stepVerifyBox),
-			new(stepCreateVersion),
-			new(stepCreateProvider),
-			new(stepPrepareUpload),
-			new(stepUpload),
-			new(stepReleaseVersion),
-		}
-	} else {
-		steps = []multistep.Step{
-			new(stepVerifyBox),
-			new(stepCreateVersion),
-			new(stepCreateProvider),
-			new(stepReleaseVersion),
+		steps = append(steps, new(stepPrepareUpload), new(stepUpload))
+		if !p.config.NoDirectUpload {
+			steps = append(steps, new(stepConfirmUpload))
 		}
 	}
+	steps = append(steps, new(stepReleaseVersion))
 
 	// Run the steps
-	p.runner = common.NewRunner(steps, p.config.PackerConfig, ui)
+	p.runner = commonsteps.NewRunner(steps, p.config.PackerConfig, ui)
 	p.runner.Run(ctx, state)
 
 	// If there was an error, return that

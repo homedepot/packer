@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/azure/common/constants"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 type EndpointType int
@@ -33,7 +33,7 @@ type StepGetIPAddress struct {
 	error    func(e error)
 }
 
-func NewStepGetIPAddress(client *AzureClient, ui packer.Ui, endpoint EndpointType) *StepGetIPAddress {
+func NewStepGetIPAddress(client *AzureClient, ui packersdk.Ui, endpoint EndpointType) *StepGetIPAddress {
 	var step = &StepGetIPAddress{
 		client:   client,
 		endpoint: endpoint,

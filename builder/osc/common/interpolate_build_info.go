@@ -1,8 +1,8 @@
 package common
 
 import (
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/outscale/osc-go/oapi"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/outscale/osc-sdk-go/osc"
 )
 
 type BuildInfoTemplate struct {
@@ -20,7 +20,7 @@ func extractBuildInfo(region string, state multistep.StateBag) *BuildInfoTemplat
 		}
 	}
 
-	sourceOMI := rawSourceOMI.(oapi.Image)
+	sourceOMI := rawSourceOMI.(osc.Image)
 	sourceOMITags := make(map[string]string, len(sourceOMI.Tags))
 	for _, tag := range sourceOMI.Tags {
 		sourceOMITags[tag.Key] = tag.Value

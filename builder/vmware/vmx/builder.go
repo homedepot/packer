@@ -8,14 +8,14 @@ import (
 	"time"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	vmwcommon "github.com/hashicorp/packer/builder/vmware/common"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
-// Builder implements packer.Builder and builds the actual VMware
+// Builder implements packersdk.Builder and builds the actual VMware
 // images.
 type Builder struct {
 	config Config
@@ -33,12 +33,17 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	return nil, warnings, nil
 }
 
-// Run executes a Packer build and returns a packer.Artifact representing
+// Run executes a Packer build and returns a packersdk.Artifact representing
 // a VMware image.
-func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (packer.Artifact, error) {
+func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook) (packersdk.Artifact, error) {
 	driver, err := vmwcommon.NewDriver(&b.config.DriverConfig, &b.config.SSHConfig, b.config.VMName)
 	if err != nil {
 		return nil, fmt.Errorf("Failed creating VMware driver: %s", err)
+	}
+	// Before we get deep into the build, make sure ovftool is present and
+	// credentials are valid, if we're going to use ovftool.
+	if err := driver.VerifyOvfTool(b.config.SkipExport, b.config.SkipValidateCredentials); err != nil {
+		return nil, err
 	}
 
 	// Set up the state.
@@ -63,10 +68,14 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			RemoteType:   b.config.RemoteType,
 			VMName:       b.config.VMName,
 		},
-		&common.StepCreateFloppy{
+		&commonsteps.StepCreateFloppy{
 			Files:       b.config.FloppyConfig.FloppyFiles,
 			Directories: b.config.FloppyConfig.FloppyDirectories,
 			Label:       b.config.FloppyConfig.FloppyLabel,
+		},
+		&commonsteps.StepCreateCD{
+			Files: b.config.CDConfig.CDFiles,
+			Label: b.config.CDConfig.CDLabel,
 		},
 		&vmwcommon.StepRemoteUpload{
 			Key:       "floppy_path",
@@ -88,15 +97,18 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			OutputDir: &b.config.OutputDir,
 			VMName:    b.config.VMName,
 			Linked:    b.config.Linked,
+			Snapshot:  b.config.AttachSnapshot,
 		},
 		&vmwcommon.StepConfigureVMX{
-			CustomData:  b.config.VMXData,
-			VMName:      b.config.VMName,
-			DisplayName: b.config.VMXDisplayName,
+			CustomData:       b.config.VMXData,
+			VMName:           b.config.VMName,
+			DisplayName:      b.config.VMXDisplayName,
+			DiskAdapterType:  b.config.DiskAdapterType,
+			CDROMAdapterType: "",
 		},
 		&vmwcommon.StepSuppressMessages{},
 		&vmwcommon.StepHTTPIPDiscover{},
-		&common.StepHTTPServer{
+		&commonsteps.StepHTTPServer{
 			HTTPDir:     b.config.HTTPDir,
 			HTTPPortMin: b.config.HTTPPortMin,
 			HTTPPortMax: b.config.HTTPPortMax,
@@ -106,7 +118,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			RemoteType: b.config.RemoteType,
 		},
 		&vmwcommon.StepConfigureVNC{
-			Enabled:            !b.config.DisableVNC,
+			Enabled:            !b.config.DisableVNC && !b.config.VNCOverWebsocket,
 			VNCBindAddress:     b.config.VNCBindAddress,
 			VNCPortMin:         b.config.VNCPortMin,
 			VNCPortMax:         b.config.VNCPortMax,
@@ -121,13 +133,16 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			DurationBeforeStop: 5 * time.Second,
 			Headless:           b.config.Headless,
 		},
-		&vmwcommon.StepTypeBootCommand{
-			BootWait:    b.config.BootWait,
-			VNCEnabled:  !b.config.DisableVNC,
-			BootCommand: b.config.FlatBootCommand(),
-			VMName:      b.config.VMName,
-			Ctx:         b.config.ctx,
-			KeyInterval: b.config.VNCConfig.BootKeyInterval,
+		&vmwcommon.StepVNCConnect{
+			VNCEnabled:         !b.config.DisableVNC,
+			VNCOverWebsocket:   b.config.VNCOverWebsocket,
+			InsecureConnection: b.config.InsecureConnection,
+			DriverConfig:       &b.config.DriverConfig,
+		},
+		&vmwcommon.StepVNCBootCommand{
+			Config: b.config.VNCConfig,
+			VMName: b.config.VMName,
+			Ctx:    b.config.ctx,
 		},
 		&communicator.StepConnect{
 			Config:    &b.config.SSHConfig.Comm,
@@ -140,8 +155,8 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			ToolsUploadPath:   b.config.ToolsUploadPath,
 			Ctx:               b.config.ctx,
 		},
-		&common.StepProvision{},
-		&common.StepCleanupTempKeys{
+		&commonsteps.StepProvision{},
+		&commonsteps.StepCleanupTempKeys{
 			Comm: &b.config.SSHConfig.Comm,
 		},
 		&vmwcommon.StepShutdown{
@@ -175,7 +190,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 	}
 
 	// Run the steps.
-	b.runner = common.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
+	b.runner = commonsteps.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
 	b.runner.Run(ctx, state)
 
 	// Report any errors.
@@ -198,5 +213,3 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 	return vmwcommon.NewArtifact(b.config.RemoteType, b.config.Format, exportOutputPath,
 		b.config.VMName, b.config.SkipExport, b.config.KeepRegistered, state)
 }
-
-// Cancel.

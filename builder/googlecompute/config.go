@@ -11,13 +11,12 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/common/uuid"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
-	"golang.org/x/oauth2/jwt"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/uuid"
 	compute "google.golang.org/api/compute/v1"
 )
 
@@ -35,6 +34,8 @@ type Config struct {
 	// run Packer on a GCE instance with a service account. Instructions for
 	// creating the file or using service accounts are above.
 	AccountFile string `mapstructure:"account_file" required:"false"`
+	// This allows service account impersonation as per the [docs](https://cloud.google.com/iam/docs/impersonating-service-accounts).
+	ImpersonateServiceAccount string `mapstructure:"impersonate_service_account" required:"false"`
 	// The project ID that will be used to launch instances and store images.
 	ProjectId string `mapstructure:"project_id" required:"true"`
 	// Full or partial URL of the guest accelerator type. GPU accelerators can
@@ -75,6 +76,8 @@ type Config struct {
 	EnableIntegrityMonitoring bool `mapstructure:"enable_integrity_monitoring" required:"false"`
 	// Whether to use an IAP proxy.
 	IAPConfig `mapstructure:",squash"`
+	// Skip creating the image. Useful for setting to `true` during a build test stage. Defaults to `false`.
+	SkipCreateImage bool `mapstructure:"skip_create_image" required:"false"`
 	// The unique name of the resulting image. Defaults to
 	// `packer-{{timestamp}}`.
 	ImageName string `mapstructure:"image_name" required:"false"`
@@ -84,12 +87,18 @@ type Config struct {
 	// * kmsKeyName -  The name of the encryption key that is stored in Google Cloud KMS.
 	// * RawKey: - A 256-bit customer-supplied encryption key, encodes in RFC 4648 base64.
 	//
-	// example:
+	// examples:
 	//
 	//  ```json
 	//  {
 	//     "kmsKeyName": "projects/${project}/locations/${region}/keyRings/computeEngine/cryptoKeys/computeEngine/cryptoKeyVersions/4"
 	//  }
+	//  ```
+	//
+	//  ```hcl
+	//   image_encryption_key {
+	//     kmsKeyName = "projects/${var.project}/locations/${var.region}/keyRings/computeEngine/cryptoKeys/computeEngine/cryptoKeyVersions/4"
+	//   }
 	//  ```
 	ImageEncryptionKey *CustomerEncryptionKey `mapstructure:"image_encryption_key" required:"false"`
 	// The name of the image family to which the resulting image belongs. You
@@ -201,6 +210,8 @@ type Config struct {
 	// - The contents of the script file will be wrapped in Packer's startup script wrapper, unless `wrap_startup_script` is disabled. See `wrap_startup_script` for more details.
 	// - Not supported by Windows instances. See [Startup Scripts for Windows](https://cloud.google.com/compute/docs/startupscript#providing_a_startup_script_for_windows_instances) for more details.
 	StartupScriptFile string `mapstructure:"startup_script_file" required:"false"`
+	// The time to wait for windows password to be retrieved. Defaults to "3m".
+	WindowsPasswordTimeout time.Duration `mapstructure:"windows_password_timeout" required:"false"`
 	// For backwards compatibility this option defaults to `"true"` in the future it will default to `"false"`.
 	// If "true", the contents of `startup_script_file` or `"startup_script"` in the instance metadata
 	// is wrapped in a Packer specific script that tracks the execution and completion of the provided
@@ -266,7 +277,7 @@ type Config struct {
 	UseOSLogin bool `mapstructure:"use_os_login" required:"false"`
 	// Can be set instead of account_file. If set, this builder will use
 	// HashiCorp Vault to generate an Oauth token for authenticating against
-	// Google's cloud. The value should be the path of the token generator
+	// Google Cloud. The value should be the path of the token generator
 	// within vault.
 	// For information on how to configure your Vault + GCP engine to produce
 	// Oauth tokens, see https://www.vaultproject.io/docs/auth/gcp
@@ -276,11 +287,20 @@ type Config struct {
 	// https://www.vaultproject.io/docs/commands/#environment-variables
 	// Example:`"vault_gcp_oauth_engine": "gcp/token/my-project-editor",`
 	VaultGCPOauthEngine string `mapstructure:"vault_gcp_oauth_engine"`
+	// The time to wait between the creation of the instance used to create the image,
+	// and the addition of SSH configuration, including SSH keys, to that instance.
+	// The delay is intended to protect packer from anything in the instance boot
+	// sequence that has potential to disrupt the creation of SSH configuration
+	// (e.g. SSH user creation, SSH key creation) on the instance.
+	// Note: All other instance metadata, including startup scripts, are still added to the instance
+	// during it's creation.
+	// Example value: `5m`.
+	WaitToAddSSHKeys time.Duration `mapstructure:"wait_to_add_ssh_keys"`
 	// The zone in which to launch the instance used to create the image.
 	// Example: "us-central1-a"
 	Zone string `mapstructure:"zone" required:"true"`
 
-	account            *jwt.Config
+	account            *ServiceAccount
 	imageAlreadyExists bool
 	ctx                interpolate.Context
 }
@@ -288,6 +308,7 @@ type Config struct {
 func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 	c.ctx.Funcs = TemplateFuncs
 	err := config.Decode(c, &config.DecodeOpts{
+		PluginType:         BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &c.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -300,7 +321,7 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 		return nil, err
 	}
 
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 
 	// Set defaults.
 	if c.Network == "" && c.Subnetwork == "" {
@@ -323,7 +344,7 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 	// monitoring relies on data gathered by Measured Boot.
 	if !c.EnableVtpm {
 		if c.EnableIntegrityMonitoring {
-			errs = packer.MultiErrorAppend(errs,
+			errs = packersdk.MultiErrorAppend(errs,
 				errors.New("You cannot enable Integrity Monitoring when vTPM is disabled."))
 		}
 	}
@@ -333,7 +354,7 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 	}
 
 	if c.OnHostMaintenance == "MIGRATE" && c.Preemptible {
-		errs = packer.MultiErrorAppend(errs,
+		errs = packersdk.MultiErrorAppend(errs,
 			errors.New("on_host_maintenance must be TERMINATE when using preemptible instances."))
 	}
 	// Setting OnHostMaintenance Correct Defaults
@@ -349,14 +370,14 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 
 	// Make sure user sets a valid value for on_host_maintenance option
 	if !(c.OnHostMaintenance == "MIGRATE" || c.OnHostMaintenance == "TERMINATE") {
-		errs = packer.MultiErrorAppend(errs,
+		errs = packersdk.MultiErrorAppend(errs,
 			errors.New("on_host_maintenance must be one of MIGRATE or TERMINATE."))
 	}
 
 	if c.ImageName == "" {
 		img, err := interpolate.Render("packer-{{timestamp}}", nil)
 		if err != nil {
-			errs = packer.MultiErrorAppend(errs,
+			errs = packersdk.MultiErrorAppend(errs,
 				fmt.Errorf("Unable to parse image name: %s ", err))
 		} else {
 			c.ImageName = img
@@ -367,27 +388,27 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 	imageErrorText := "Invalid image %s %q: The first character must be a lowercase letter, and all following characters must be a dash, lowercase letter, or digit, except the last character, which cannot be a dash"
 
 	if len(c.ImageName) > 63 {
-		errs = packer.MultiErrorAppend(errs,
+		errs = packersdk.MultiErrorAppend(errs,
 			errors.New("Invalid image name: Must not be longer than 63 characters"))
 	}
 
 	if !validImageName.MatchString(c.ImageName) {
-		errs = packer.MultiErrorAppend(errs, errors.New(fmt.Sprintf(imageErrorText, "name", c.ImageName)))
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf(imageErrorText, "name", c.ImageName))
 	}
 
 	if len(c.ImageFamily) > 63 {
-		errs = packer.MultiErrorAppend(errs,
+		errs = packersdk.MultiErrorAppend(errs,
 			errors.New("Invalid image family: Must not be longer than 63 characters"))
 	}
 
 	if c.ImageFamily != "" {
 		if !validImageName.MatchString(c.ImageFamily) {
-			errs = packer.MultiErrorAppend(errs, errors.New(fmt.Sprintf(imageErrorText, "family", c.ImageFamily)))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf(imageErrorText, "family", c.ImageFamily))
 		}
 	}
 
 	if len(c.ImageStorageLocations) > 1 {
-		errs = packer.MultiErrorAppend(errs,
+		errs = packersdk.MultiErrorAppend(errs,
 			errors.New("Invalid image storage locations: Must not have more than 1 region"))
 	}
 
@@ -409,7 +430,7 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 
 	// Set up communicator
 	if es := c.Comm.Prepare(&c.ctx); len(es) > 0 {
-		errs = packer.MultiErrorAppend(errs, es...)
+		errs = packersdk.MultiErrorAppend(errs, es...)
 	}
 
 	// set defaults for IAP
@@ -439,7 +460,7 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 	if c.IAPConfig.IAP {
 		if !SupportsIAPTunnel(&c.Comm) {
 			err := fmt.Errorf("Error: IAP tunnel is not implemented for %s communicator", c.Comm.Type)
-			errs = packer.MultiErrorAppend(errs, err)
+			errs = packersdk.MultiErrorAppend(errs, err)
 		}
 		// These configuration values are copied early to the generic host parameter when configuring
 		// StepConnect. As such they must be set now. Ideally we would handle this as part of
@@ -452,7 +473,7 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 
 	// Process required parameters.
 	if c.ProjectId == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("a project_id must be specified"))
 	}
 
@@ -465,12 +486,12 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 	}
 
 	if c.SourceImage == "" && c.SourceImageFamily == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("a source_image or source_image_family must be specified"))
 	}
 
 	if c.Zone == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("a zone must be specified"))
 	}
 	if c.Region == "" && len(c.Zone) > 2 {
@@ -481,47 +502,51 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 
 	// Authenticating via an account file
 	if c.AccountFile != "" {
-		if c.VaultGCPOauthEngine != "" {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("You cannot "+
-				"specify both account_file and vault_gcp_oauth_engine."))
+		if c.VaultGCPOauthEngine != "" && c.ImpersonateServiceAccount != "" {
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("You cannot "+
+				"specify impersonate_service_account, account_file and vault_gcp_oauth_engine at the same time"))
 		}
 		cfg, err := ProcessAccountFile(c.AccountFile)
 		if err != nil {
-			errs = packer.MultiErrorAppend(errs, err)
+			errs = packersdk.MultiErrorAppend(errs, err)
 		}
 		c.account = cfg
 	}
 
 	if c.OmitExternalIP && c.Address != "" {
-		errs = packer.MultiErrorAppend(fmt.Errorf("you can not specify an external address when 'omit_external_ip' is true"))
+		errs = packersdk.MultiErrorAppend(fmt.Errorf("you can not specify an external address when 'omit_external_ip' is true"))
 	}
 
 	if c.OmitExternalIP && !c.UseInternalIP {
-		errs = packer.MultiErrorAppend(fmt.Errorf("'use_internal_ip' must be true if 'omit_external_ip' is true"))
+		errs = packersdk.MultiErrorAppend(fmt.Errorf("'use_internal_ip' must be true if 'omit_external_ip' is true"))
 	}
 
 	if c.AcceleratorCount > 0 && len(c.AcceleratorType) == 0 {
-		errs = packer.MultiErrorAppend(fmt.Errorf("'accelerator_type' must be set when 'accelerator_count' is more than 0"))
+		errs = packersdk.MultiErrorAppend(fmt.Errorf("'accelerator_type' must be set when 'accelerator_count' is more than 0"))
 	}
 
 	if c.AcceleratorCount > 0 && c.OnHostMaintenance != "TERMINATE" {
-		errs = packer.MultiErrorAppend(fmt.Errorf("'on_host_maintenance' must be set to 'TERMINATE' when 'accelerator_count' is more than 0"))
+		errs = packersdk.MultiErrorAppend(fmt.Errorf("'on_host_maintenance' must be set to 'TERMINATE' when 'accelerator_count' is more than 0"))
 	}
 
 	// If DisableDefaultServiceAccount is provided, don't allow a value for ServiceAccountEmail
 	if c.DisableDefaultServiceAccount && c.ServiceAccountEmail != "" {
-		errs = packer.MultiErrorAppend(fmt.Errorf("you may not specify a 'service_account_email' when 'disable_default_service_account' is true"))
+		errs = packersdk.MultiErrorAppend(fmt.Errorf("you may not specify a 'service_account_email' when 'disable_default_service_account' is true"))
 	}
 
 	if c.StartupScriptFile != "" {
 		if _, err := os.Stat(c.StartupScriptFile); err != nil {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("startup_script_file: %v", err))
 		}
 
 		if c.WrapStartupScriptFile == config.TriUnset {
 			c.WrapStartupScriptFile = config.TriTrue
 		}
+	}
+	// Check windows password timeout is provided
+	if c.WindowsPasswordTimeout == 0 {
+		c.WindowsPasswordTimeout = 3 * time.Minute
 	}
 
 	// Check for any errors.
@@ -535,11 +560,11 @@ func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 type CustomerEncryptionKey struct {
 	// KmsKeyName: The name of the encryption key that is stored in Google
 	// Cloud KMS.
-	KmsKeyName string `json:"kmsKeyName,omitempty"`
+	KmsKeyName string `mapstructure:"kmsKeyName" json:"kmsKeyName,omitempty"`
 
 	// RawKey: Specifies a 256-bit customer-supplied encryption key, encoded
 	// in RFC 4648 base64 to either encrypt or decrypt this resource.
-	RawKey string `json:"rawKey,omitempty"`
+	RawKey string `mapstructure:"rawKey" json:"rawKey,omitempty"`
 }
 
 func (k *CustomerEncryptionKey) ComputeType() *compute.CustomerEncryptionKey {

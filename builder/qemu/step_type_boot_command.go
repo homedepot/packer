@@ -7,10 +7,10 @@ import (
 	"net"
 	"time"
 
-	"github.com/hashicorp/packer/common/bootcommand"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/bootcommand"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	"github.com/mitchellh/go-vnc"
 )
 
@@ -27,7 +27,7 @@ type bootCommandTemplateData struct {
 // Uses:
 //   config *config
 //   http_port int
-//   ui     packer.Ui
+//   ui     packersdk.Ui
 //   vnc_port int
 //
 // Produces:
@@ -38,7 +38,7 @@ func (s *stepTypeBootCommand) Run(ctx context.Context, state multistep.StateBag)
 	config := state.Get("config").(*Config)
 	debug := state.Get("debug").(bool)
 	httpPort := state.Get("http_port").(int)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vncPort := state.Get("vnc_port").(int)
 	vncIP := config.VNCBindAddress
 	vncPassword := state.Get("vnc_password")

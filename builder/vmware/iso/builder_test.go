@@ -7,7 +7,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func testConfig() map[string]interface{} {
@@ -17,14 +18,14 @@ func testConfig() map[string]interface{} {
 		"shutdown_command": "foo",
 		"ssh_username":     "foo",
 
-		packer.BuildNameConfigKey: "foo",
+		common.BuildNameConfigKey: "foo",
 	}
 }
 
 func TestBuilder_ImplementsBuilder(t *testing.T) {
 	var raw interface{}
 	raw = &Builder{}
-	if _, ok := raw.(packer.Builder); !ok {
+	if _, ok := raw.(packersdk.Builder); !ok {
 		t.Error("Builder must implement builder.")
 	}
 }
@@ -106,7 +107,7 @@ func TestBuilderPrepare_FloppyFiles(t *testing.T) {
 		t.Fatalf("bad: %#v", b.config.FloppyFiles)
 	}
 
-	floppies_path := "../../../common/test-fixtures/floppies"
+	floppies_path := "../../test-fixtures/floppies"
 	config["floppy_files"] = []string{fmt.Sprintf("%s/bar.bat", floppies_path), fmt.Sprintf("%s/foo.ps1", floppies_path)}
 	b = Builder{}
 	_, warns, err = b.Prepare(config)
@@ -134,7 +135,7 @@ func TestBuilderPrepare_InvalidFloppies(t *testing.T) {
 		t.Fatalf("Nonexistent floppies should trigger multierror")
 	}
 
-	if len(errs.(*packer.MultiError).Errors) != 2 {
+	if len(errs.(*packersdk.MultiError).Errors) != 2 {
 		t.Fatalf("Multierror should work and report 2 errors")
 	}
 }
@@ -195,6 +196,123 @@ func TestBuilderPrepare_RemoteType(t *testing.T) {
 	}
 	if err != nil {
 		t.Fatalf("should not have error: %s", err)
+	}
+}
+
+func TestBuilderPrepare_Export(t *testing.T) {
+	type testCase struct {
+		InputConfigVals         map[string]string
+		ExpectedSkipExportValue bool
+		ExpectedFormat          string
+		ExpectedErr             bool
+		Reason                  string
+	}
+	testCases := []testCase{
+		{
+			InputConfigVals: map[string]string{
+				"remote_type": "",
+				"format":      "",
+			},
+			ExpectedSkipExportValue: true,
+			ExpectedFormat:          "vmx",
+			ExpectedErr:             false,
+			Reason:                  "should have defaulted format to vmx.",
+		},
+		{
+			InputConfigVals: map[string]string{
+				"remote_type":     "esx5",
+				"format":          "",
+				"remote_host":     "fakehost.com",
+				"remote_password": "fakepassword",
+				"remote_username": "fakeuser",
+			},
+			ExpectedSkipExportValue: false,
+			ExpectedFormat:          "ovf",
+			ExpectedErr:             false,
+			Reason:                  "should have defaulted format to ovf with remote set to esx5.",
+		},
+		{
+			InputConfigVals: map[string]string{
+				"remote_type": "esx5",
+				"format":      "",
+			},
+			ExpectedSkipExportValue: false,
+			ExpectedFormat:          "ovf",
+			ExpectedErr:             true,
+			Reason:                  "should have errored because remote host isn't set for remote build.",
+		},
+		{
+			InputConfigVals: map[string]string{
+				"remote_type":     "invalid",
+				"format":          "",
+				"remote_host":     "fakehost.com",
+				"remote_password": "fakepassword",
+				"remote_username": "fakeuser",
+			},
+			ExpectedSkipExportValue: false,
+			ExpectedFormat:          "ovf",
+			ExpectedErr:             true,
+			Reason:                  "should error with invalid remote type",
+		},
+		{
+			InputConfigVals: map[string]string{
+				"remote_type": "",
+				"format":      "invalid",
+			},
+			ExpectedSkipExportValue: false,
+			ExpectedFormat:          "invalid",
+			ExpectedErr:             true,
+			Reason:                  "should error with invalid format",
+		},
+		{
+			InputConfigVals: map[string]string{
+				"remote_type": "",
+				"format":      "ova",
+			},
+			ExpectedSkipExportValue: false,
+			ExpectedFormat:          "ova",
+			ExpectedErr:             false,
+			Reason:                  "should set user-given ova format",
+		},
+		{
+			InputConfigVals: map[string]string{
+				"remote_type":     "esx5",
+				"format":          "ova",
+				"remote_host":     "fakehost.com",
+				"remote_password": "fakepassword",
+				"remote_username": "fakeuser",
+			},
+			ExpectedSkipExportValue: false,
+			ExpectedFormat:          "ova",
+			ExpectedErr:             false,
+			Reason:                  "should set user-given ova format",
+		},
+	}
+	for _, tc := range testCases {
+		config := testConfig()
+		for k, v := range tc.InputConfigVals {
+			config[k] = v
+		}
+		config["skip_validate_credentials"] = true
+		outCfg := &Config{}
+		warns, errs := (outCfg).Prepare(config)
+
+		if len(warns) > 0 {
+			t.Fatalf("bad: %#v", warns)
+		}
+
+		if (errs != nil) != tc.ExpectedErr {
+			t.Fatalf("received error: \n %s \n but 'expected err' was %t", errs, tc.ExpectedErr)
+		}
+
+		if outCfg.Format != tc.ExpectedFormat {
+			t.Fatalf("Expected: %s. Actual: %s. Reason: %s", tc.ExpectedFormat,
+				outCfg.Format, tc.Reason)
+		}
+		if outCfg.SkipExport != tc.ExpectedSkipExportValue {
+			t.Fatalf("For SkipExport expected %t but recieved %t",
+				tc.ExpectedSkipExportValue, outCfg.SkipExport)
+		}
 	}
 }
 

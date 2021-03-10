@@ -15,13 +15,13 @@ import (
 	"github.com/Azure/go-autorest/autorest/adal"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	packerAzureCommon "github.com/hashicorp/packer/builder/azure/common"
 	"github.com/hashicorp/packer/builder/azure/common/constants"
 	"github.com/hashicorp/packer/builder/azure/common/lin"
-	packerCommon "github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 type Builder struct {
@@ -51,7 +51,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	return nil, warnings, errs
 }
 
-func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (packer.Artifact, error) {
+func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook) (packersdk.Artifact, error) {
 
 	ui.Say("Running builder ...")
 
@@ -84,6 +84,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 	ui.Message("Creating Azure Resource Manager (ARM) client ...")
 	azureClient, err := NewAzureClient(
 		b.config.ClientConfig.SubscriptionID,
+		b.config.SharedGalleryDestination.SigDestinationSubscription,
 		b.config.ResourceGroupName,
 		b.config.StorageAccount,
 		b.config.ClientConfig.CloudEnvironment(),
@@ -210,8 +211,8 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 				Host:      lin.SSHHost,
 				SSHConfig: b.config.Comm.SSHConfigFunc(),
 			},
-			&packerCommon.StepProvision{},
-			&packerCommon.StepCleanupTempKeys{
+			&commonsteps.StepProvision{},
+			&commonsteps.StepCleanupTempKeys{
 				Comm: &b.config.Comm,
 			},
 			NewStepGetOSDisk(azureClient, ui),
@@ -221,7 +222,6 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			NewStepSnapshotDataDisks(azureClient, ui, &b.config),
 			NewStepCaptureImage(azureClient, ui),
 			NewStepPublishToSharedImageGallery(azureClient, ui, &b.config),
-			NewStepDeleteAdditionalDisks(azureClient, ui),
 		}
 	} else if b.config.OSType == constants.Target_Windows {
 		steps = []multistep.Step{
@@ -254,7 +254,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 					}, nil
 				},
 			},
-			&packerCommon.StepProvision{},
+			&commonsteps.StepProvision{},
 			NewStepGetOSDisk(azureClient, ui),
 			NewStepGetAdditionalDisks(azureClient, ui),
 			NewStepPowerOffCompute(azureClient, ui),
@@ -262,7 +262,6 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 			NewStepSnapshotDataDisks(azureClient, ui, &b.config),
 			NewStepCaptureImage(azureClient, ui),
 			NewStepPublishToSharedImageGallery(azureClient, ui, &b.config),
-			NewStepDeleteAdditionalDisks(azureClient, ui),
 		)
 	} else {
 		return nil, fmt.Errorf("Builder does not support the os_type '%s'", b.config.OSType)
@@ -280,7 +279,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 		}
 	}
 
-	b.runner = packerCommon.NewRunner(steps, b.config.PackerConfig, ui)
+	b.runner = commonsteps.NewRunner(steps, b.config.PackerConfig, ui)
 	b.runner.Run(ctx, b.stateBag)
 
 	// Report any errors.
@@ -340,7 +339,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 	}, nil
 }
 
-func (b *Builder) writeSSHPrivateKey(ui packer.Ui, debugKeyPath string) {
+func (b *Builder) writeSSHPrivateKey(ui packersdk.Ui, debugKeyPath string) {
 	f, err := os.Create(debugKeyPath)
 	if err != nil {
 		ui.Say(fmt.Sprintf("Error saving debug key: %s", err))
@@ -389,7 +388,7 @@ func (b *Builder) getBlobAccount(ctx context.Context, client *AzureClient, resou
 func (b *Builder) configureStateBag(stateBag multistep.StateBag) {
 	stateBag.Put(constants.AuthorizedKey, b.config.sshAuthorizedKey)
 
-	stateBag.Put(constants.ArmTags, b.config.AzureTags)
+	stateBag.Put(constants.ArmTags, packerAzureCommon.MapToAzureTags(b.config.AzureTags))
 	stateBag.Put(constants.ArmComputeName, b.config.tmpComputeName)
 	stateBag.Put(constants.ArmDeploymentName, b.config.tmpDeploymentName)
 
@@ -456,7 +455,7 @@ func (b *Builder) getServicePrincipalTokens(say func(string)) (*adal.ServicePrin
 	return b.config.ClientConfig.GetServicePrincipalTokens(say)
 }
 
-func getObjectIdFromToken(ui packer.Ui, token *adal.ServicePrincipalToken) string {
+func getObjectIdFromToken(ui packersdk.Ui, token *adal.ServicePrincipalToken) string {
 	claims := jwt.MapClaims{}
 	var p jwt.Parser
 

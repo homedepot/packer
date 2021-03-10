@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/hashicorp/go-uuid"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/file"
 	"github.com/hashicorp/packer/builder/null"
 	"github.com/hashicorp/packer/packer"
@@ -138,7 +140,7 @@ func TestBuild(t *testing.T) {
 		},
 
 		{
-			name: "build name: HCL",
+			name: "source name: HCL",
 			args: []string{
 				"-parallel-builds=1", // to ensure order is kept
 				testFixture("build-name-and-type"),
@@ -297,7 +299,6 @@ func TestBuild(t *testing.T) {
 				},
 			},
 		},
-
 		{
 			name: "hcl - recipes - only recipes",
 			args: []string{
@@ -311,6 +312,74 @@ func TestBuild(t *testing.T) {
 				expectedContent: map[string]string{
 					"NULL.spaghetti_carbonara.txt": spaghettiCarbonara,
 					"NULL.lasagna.txt":             lasagna,
+				},
+			},
+		},
+		{
+			name: "hcl - build.name accessible",
+			args: []string{
+				filepath.Join(testFixture("build-name-and-type"), "buildname.pkr.hcl"),
+			},
+			fileCheck: fileCheck{
+				expected: []string{
+					"pineapple.pizza.txt",
+				},
+			},
+		},
+
+		{
+			name: "hcl - valid validation rule for default value",
+			args: []string{
+				filepath.Join(testFixture("hcl", "validation", "map")),
+			},
+			expectedCode: 0,
+		},
+
+		{
+			name: "hcl - valid setting from varfile",
+			args: []string{
+				"-var-file", filepath.Join(testFixture("hcl", "validation", "map", "valid_value.pkrvars.hcl")),
+				filepath.Join(testFixture("hcl", "validation", "map")),
+			},
+			expectedCode: 0,
+		},
+
+		{
+			name: "hcl - invalid setting from varfile",
+			args: []string{
+				"-var-file", filepath.Join(testFixture("hcl", "validation", "map", "invalid_value.pkrvars.hcl")),
+				filepath.Join(testFixture("hcl", "validation", "map")),
+			},
+			expectedCode: 1,
+		},
+
+		{
+			name: "hcl - valid cmd ( invalid varfile bypased )",
+			args: []string{
+				"-var-file", filepath.Join(testFixture("hcl", "validation", "map", "invalid_value.pkrvars.hcl")),
+				"-var", `image_metadata={key = "new_value", something = { foo = "bar" }}`,
+				filepath.Join(testFixture("hcl", "validation", "map")),
+			},
+			expectedCode: 0,
+		},
+
+		{
+			name: "hcl - invalid cmd ( valid varfile bypased )",
+			args: []string{
+				"-var-file", filepath.Join(testFixture("hcl", "validation", "map", "valid_value.pkrvars.hcl")),
+				"-var", `image_metadata={key = "?", something = { foo = "wrong" }}`,
+				filepath.Join(testFixture("hcl", "validation", "map")),
+			},
+			expectedCode: 1,
+		},
+		{
+			name: "hcl - execute and use datasource",
+			args: []string{
+				testFixture("hcl", "datasource.pkr.hcl"),
+			},
+			fileCheck: fileCheck{
+				expectedContent: map[string]string{
+					"chocolate.txt": "chocolate",
 				},
 			},
 		},
@@ -560,6 +629,17 @@ func TestBuildExceptFileCommaFlags(t *testing.T) {
 			buildNotExpectedFiles:    []string{"chocolate.txt", "vanilla.txt", "tomato.txt", "unnamed.txt"},
 			postProcNotExpectedFiles: []string{"pear.txt, banana.txt"},
 		},
+		{
+			name: "HCL2-JSON: except build and post-processor",
+			args: []string{
+				"-parallel-builds=1",
+				"-except=file.chocolate,file.vanilla,tomato",
+				filepath.Join(testFixture("build-only"), "template.pkr.json"),
+			},
+			expectedFiles:            []string{"apple.txt", "cherry.txt", "peach.txt"},
+			buildNotExpectedFiles:    []string{"chocolate.txt", "vanilla.txt", "tomato.txt", "unnamed.txt"},
+			postProcNotExpectedFiles: []string{"pear.txt, banana.txt"},
+		},
 	}
 
 	for _, tt := range tc {
@@ -614,6 +694,79 @@ func testHCLOnlyExceptFlags(t *testing.T, args, present, notPresent []string) {
 			t.Errorf("Expected to find %s", f)
 		}
 	}
+}
+
+func TestHCL2PostProcessorForceFlag(t *testing.T) {
+	t.Helper()
+
+	UUID, _ := uuid.GenerateUUID()
+	// Manifest will only clean with force if the build's PACKER_RUN_UUID are different
+	os.Setenv("PACKER_RUN_UUID", UUID)
+	defer os.Unsetenv("PACKER_RUN_UUID")
+
+	args := []string{
+		filepath.Join(testFixture("hcl"), "force.pkr.hcl"),
+	}
+	fCheck := fileCheck{
+		expectedContent: map[string]string{
+			"manifest.json": fmt.Sprintf(`{
+  "builds": [
+    {
+      "name": "potato",
+      "builder_type": "null",
+      "files": null,
+      "artifact_id": "Null",
+      "packer_run_uuid": %q,
+      "custom_data": null
+    }
+  ],
+  "last_run_uuid": %q
+}`, UUID, UUID),
+		},
+	}
+	defer fCheck.cleanup(t)
+
+	c := &BuildCommand{
+		Meta: testMetaFile(t),
+	}
+	if code := c.Run(args); code != 0 {
+		fatalCommand(t, c.Meta)
+	}
+	fCheck.verify(t)
+
+	// Second build should override previous manifest
+	UUID, _ = uuid.GenerateUUID()
+	os.Setenv("PACKER_RUN_UUID", UUID)
+
+	args = []string{
+		"-force",
+		filepath.Join(testFixture("hcl"), "force.pkr.hcl"),
+	}
+	fCheck = fileCheck{
+		expectedContent: map[string]string{
+			"manifest.json": fmt.Sprintf(`{
+  "builds": [
+    {
+      "name": "potato",
+      "builder_type": "null",
+      "files": null,
+      "artifact_id": "Null",
+      "packer_run_uuid": %q,
+      "custom_data": null
+    }
+  ],
+  "last_run_uuid": %q
+}`, UUID, UUID),
+		},
+	}
+
+	c = &BuildCommand{
+		Meta: testMetaFile(t),
+	}
+	if code := c.Run(args); code != 0 {
+		fatalCommand(t, c.Meta)
+	}
+	fCheck.verify(t)
 }
 
 func TestBuildCommand_HCLOnlyExceptOptions(t *testing.T) {
@@ -768,18 +921,23 @@ func fileExists(filename string) bool {
 // available. This allows us to test a builder that writes files to disk.
 func testCoreConfigBuilder(t *testing.T) *packer.CoreConfig {
 	components := packer.ComponentFinder{
-		BuilderStore: packer.MapOfBuilder{
-			"file": func() (packer.Builder, error) { return &file.Builder{}, nil },
-			"null": func() (packer.Builder, error) { return &null.Builder{}, nil },
-		},
-		ProvisionerStore: packer.MapOfProvisioner{
-			"shell-local": func() (packer.Provisioner, error) { return &shell_local.Provisioner{}, nil },
-			"shell":       func() (packer.Provisioner, error) { return &shell.Provisioner{}, nil },
-			"file":        func() (packer.Provisioner, error) { return &filep.Provisioner{}, nil },
-		},
-		PostProcessorStore: packer.MapOfPostProcessor{
-			"shell-local": func() (packer.PostProcessor, error) { return &shell_local_pp.PostProcessor{}, nil },
-			"manifest":    func() (packer.PostProcessor, error) { return &manifest.PostProcessor{}, nil },
+		PluginConfig: &packer.PluginConfig{
+			Builders: packer.MapOfBuilder{
+				"file": func() (packersdk.Builder, error) { return &file.Builder{}, nil },
+				"null": func() (packersdk.Builder, error) { return &null.Builder{}, nil },
+			},
+			Provisioners: packer.MapOfProvisioner{
+				"shell-local": func() (packersdk.Provisioner, error) { return &shell_local.Provisioner{}, nil },
+				"shell":       func() (packersdk.Provisioner, error) { return &shell.Provisioner{}, nil },
+				"file":        func() (packersdk.Provisioner, error) { return &filep.Provisioner{}, nil },
+			},
+			PostProcessors: packer.MapOfPostProcessor{
+				"shell-local": func() (packersdk.PostProcessor, error) { return &shell_local_pp.PostProcessor{}, nil },
+				"manifest":    func() (packersdk.PostProcessor, error) { return &manifest.PostProcessor{}, nil },
+			},
+			DataSources: packer.MapOfDatasource{
+				"mock": func() (packersdk.Datasource, error) { return &packersdk.MockDatasource{}, nil },
+			},
 		},
 	}
 	return &packer.CoreConfig{
@@ -792,7 +950,7 @@ func testMetaFile(t *testing.T) Meta {
 	var out, err bytes.Buffer
 	return Meta{
 		CoreConfig: testCoreConfigBuilder(t),
-		Ui: &packer.BasicUi{
+		Ui: &packersdk.BasicUi{
 			Writer:      &out,
 			ErrorWriter: &err,
 		},

@@ -10,8 +10,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/packer/plugin"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/plugin"
 
 	alicloudecsbuilder "github.com/hashicorp/packer/builder/alicloud/ecs"
 	amazonchrootbuilder "github.com/hashicorp/packer/builder/amazon/chroot"
@@ -24,7 +24,6 @@ import (
 	azuredtlbuilder "github.com/hashicorp/packer/builder/azure/dtl"
 	cloudstackbuilder "github.com/hashicorp/packer/builder/cloudstack"
 	digitaloceanbuilder "github.com/hashicorp/packer/builder/digitalocean"
-	dockerbuilder "github.com/hashicorp/packer/builder/docker"
 	filebuilder "github.com/hashicorp/packer/builder/file"
 	googlecomputebuilder "github.com/hashicorp/packer/builder/googlecompute"
 	hcloudbuilder "github.com/hashicorp/packer/builder/hcloud"
@@ -49,6 +48,8 @@ import (
 	parallelspvmbuilder "github.com/hashicorp/packer/builder/parallels/pvm"
 	profitbricksbuilder "github.com/hashicorp/packer/builder/profitbricks"
 	proxmoxbuilder "github.com/hashicorp/packer/builder/proxmox"
+	proxmoxclonebuilder "github.com/hashicorp/packer/builder/proxmox/clone"
+	proxmoxisobuilder "github.com/hashicorp/packer/builder/proxmox/iso"
 	qemubuilder "github.com/hashicorp/packer/builder/qemu"
 	scalewaybuilder "github.com/hashicorp/packer/builder/scaleway"
 	tencentcloudcvmbuilder "github.com/hashicorp/packer/builder/tencentcloud/cvm"
@@ -63,17 +64,14 @@ import (
 	vsphereclonebuilder "github.com/hashicorp/packer/builder/vsphere/clone"
 	vsphereisobuilder "github.com/hashicorp/packer/builder/vsphere/iso"
 	yandexbuilder "github.com/hashicorp/packer/builder/yandex"
+	amazonamidatasource "github.com/hashicorp/packer/datasource/amazon/ami"
+	amazonsecretsmanagerdatasource "github.com/hashicorp/packer/datasource/amazon/secretsmanager"
 	alicloudimportpostprocessor "github.com/hashicorp/packer/post-processor/alicloud-import"
 	amazonimportpostprocessor "github.com/hashicorp/packer/post-processor/amazon-import"
 	artificepostprocessor "github.com/hashicorp/packer/post-processor/artifice"
 	checksumpostprocessor "github.com/hashicorp/packer/post-processor/checksum"
 	compresspostprocessor "github.com/hashicorp/packer/post-processor/compress"
 	digitaloceanimportpostprocessor "github.com/hashicorp/packer/post-processor/digitalocean-import"
-	dockerimportpostprocessor "github.com/hashicorp/packer/post-processor/docker-import"
-	dockerpushpostprocessor "github.com/hashicorp/packer/post-processor/docker-push"
-	dockersavepostprocessor "github.com/hashicorp/packer/post-processor/docker-save"
-	dockertagpostprocessor "github.com/hashicorp/packer/post-processor/docker-tag"
-	exoscaleimportpostprocessor "github.com/hashicorp/packer/post-processor/exoscale-import"
 	googlecomputeexportpostprocessor "github.com/hashicorp/packer/post-processor/googlecompute-export"
 	googlecomputeimportpostprocessor "github.com/hashicorp/packer/post-processor/googlecompute-import"
 	manifestpostprocessor "github.com/hashicorp/packer/post-processor/manifest"
@@ -109,7 +107,7 @@ type PluginCommand struct {
 	Meta
 }
 
-var Builders = map[string]packer.Builder{
+var Builders = map[string]packersdk.Builder{
 	"alicloud-ecs":        new(alicloudecsbuilder.Builder),
 	"amazon-chroot":       new(amazonchrootbuilder.Builder),
 	"amazon-ebs":          new(amazonebsbuilder.Builder),
@@ -121,7 +119,6 @@ var Builders = map[string]packer.Builder{
 	"azure-dtl":           new(azuredtlbuilder.Builder),
 	"cloudstack":          new(cloudstackbuilder.Builder),
 	"digitalocean":        new(digitaloceanbuilder.Builder),
-	"docker":              new(dockerbuilder.Builder),
 	"file":                new(filebuilder.Builder),
 	"googlecompute":       new(googlecomputebuilder.Builder),
 	"hcloud":              new(hcloudbuilder.Builder),
@@ -146,6 +143,8 @@ var Builders = map[string]packer.Builder{
 	"parallels-pvm":       new(parallelspvmbuilder.Builder),
 	"profitbricks":        new(profitbricksbuilder.Builder),
 	"proxmox":             new(proxmoxbuilder.Builder),
+	"proxmox-clone":       new(proxmoxclonebuilder.Builder),
+	"proxmox-iso":         new(proxmoxisobuilder.Builder),
 	"qemu":                new(qemubuilder.Builder),
 	"scaleway":            new(scalewaybuilder.Builder),
 	"tencentcloud-cvm":    new(tencentcloudcvmbuilder.Builder),
@@ -162,7 +161,7 @@ var Builders = map[string]packer.Builder{
 	"yandex":              new(yandexbuilder.Builder),
 }
 
-var Provisioners = map[string]packer.Provisioner{
+var Provisioners = map[string]packersdk.Provisioner{
 	"ansible":           new(ansibleprovisioner.Provisioner),
 	"ansible-local":     new(ansiblelocalprovisioner.Provisioner),
 	"azure-dtlartifact": new(azuredtlartifactprovisioner.Provisioner),
@@ -183,18 +182,13 @@ var Provisioners = map[string]packer.Provisioner{
 	"windows-shell":     new(windowsshellprovisioner.Provisioner),
 }
 
-var PostProcessors = map[string]packer.PostProcessor{
+var PostProcessors = map[string]packersdk.PostProcessor{
 	"alicloud-import":      new(alicloudimportpostprocessor.PostProcessor),
 	"amazon-import":        new(amazonimportpostprocessor.PostProcessor),
 	"artifice":             new(artificepostprocessor.PostProcessor),
 	"checksum":             new(checksumpostprocessor.PostProcessor),
 	"compress":             new(compresspostprocessor.PostProcessor),
 	"digitalocean-import":  new(digitaloceanimportpostprocessor.PostProcessor),
-	"docker-import":        new(dockerimportpostprocessor.PostProcessor),
-	"docker-push":          new(dockerpushpostprocessor.PostProcessor),
-	"docker-save":          new(dockersavepostprocessor.PostProcessor),
-	"docker-tag":           new(dockertagpostprocessor.PostProcessor),
-	"exoscale-import":      new(exoscaleimportpostprocessor.PostProcessor),
 	"googlecompute-export": new(googlecomputeexportpostprocessor.PostProcessor),
 	"googlecompute-import": new(googlecomputeimportpostprocessor.PostProcessor),
 	"manifest":             new(manifestpostprocessor.PostProcessor),
@@ -208,7 +202,12 @@ var PostProcessors = map[string]packer.PostProcessor{
 	"yandex-import":        new(yandeximportpostprocessor.PostProcessor),
 }
 
-var pluginRegexp = regexp.MustCompile("packer-(builder|post-processor|provisioner)-(.+)")
+var Datasources = map[string]packersdk.Datasource{
+	"amazon-ami":            new(amazonamidatasource.Datasource),
+	"amazon-secretsmanager": new(amazonsecretsmanagerdatasource.Datasource),
+}
+
+var pluginRegexp = regexp.MustCompile("packer-(builder|post-processor|provisioner|datasource)-(.+)")
 
 func (c *PluginCommand) Run(args []string) int {
 	// This is an internal call (users should not call this directly) so we're
@@ -257,6 +256,13 @@ func (c *PluginCommand) Run(args []string) int {
 			return 1
 		}
 		server.RegisterPostProcessor(postProcessor)
+	case "datasource":
+		datasource, found := Datasources[pluginName]
+		if !found {
+			c.Ui.Error(fmt.Sprintf("Could not load datasource: %s", pluginName))
+			return 1
+		}
+		server.RegisterDatasource(datasource)
 	}
 
 	server.Serve()

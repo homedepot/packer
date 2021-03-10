@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 )
 
 // Player5Driver is a driver that can run VMware Player 5 on Linux.
@@ -25,7 +25,13 @@ type Player5Driver struct {
 	SSHConfig *SSHConfig
 }
 
-func (d *Player5Driver) Clone(dst, src string, linked bool) error {
+func NewPlayer5Driver(config *SSHConfig) Driver {
+	return &Player5Driver{
+		SSHConfig: config,
+	}
+}
+
+func (d *Player5Driver) Clone(dst, src string, linked bool, snapshot string) error {
 	return errors.New("Cloning is not supported with VMWare Player version 5. Please use VMWare Player version 6, or greater.")
 }
 
@@ -198,12 +204,32 @@ func (d *Player5Driver) Verify() error {
 
 	d.VmwareDriver.NetworkMapper = func() (NetworkNameMapper, error) {
 		pathNetmap := playerNetmapConfPath()
-		if _, err := os.Stat(pathNetmap); err != nil {
-			return nil, fmt.Errorf("Could not find netmap conf file: %s", pathNetmap)
-		}
-		log.Printf("Located networkmapper configuration file using Player: %s", pathNetmap)
 
-		return ReadNetmapConfig(pathNetmap)
+		// If we were able to find the file (no error), then we can proceed with reading
+		// the networkmapper configuration.
+		if _, err := os.Stat(pathNetmap); err == nil {
+			log.Printf("Located networkmapper configuration file using Player: %s", pathNetmap)
+			return ReadNetmapConfig(pathNetmap)
+		}
+
+		// If we weren't able to find the networkmapper configuration file, then fall back
+		// to the networking file which might also be in the configuration directory.
+		libpath, _ := playerVMwareRoot()
+		pathNetworking := filepath.Join(libpath, "networking")
+		if _, err := os.Stat(pathNetworking); err != nil {
+			return nil, fmt.Errorf("Could not determine network mappings from files in path: %s", libpath)
+		}
+
+		// We were able to successfully stat the file.. So, now we can open a handle to it.
+		log.Printf("Located networking configuration file using Player: %s", pathNetworking)
+		fd, err := os.Open(pathNetworking)
+		if err != nil {
+			return nil, err
+		}
+		defer fd.Close()
+
+		// Then we pass the handle to the networking configuration parser.
+		return ReadNetworkingConfig(fd)
 	}
 	return nil
 }

@@ -6,56 +6,55 @@ import (
 	"log"
 	"path/filepath"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // This step creates the virtual disk that will be used as the
 // hard drive for the virtual machine.
-type stepCreateDisk struct{}
+type stepCreateDisk struct {
+	AdditionalDiskSize []string
+	DiskImage          bool
+	DiskSize           string
+	Format             string
+	OutputDir          string
+	UseBackingFile     bool
+	VMName             string
+	QemuImgArgs        QemuImgArgs
+}
 
 func (s *stepCreateDisk) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
-	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
-	name := config.VMName
+	ui := state.Get("ui").(packersdk.Ui)
+	name := s.VMName
 
-	if config.DiskImage && !config.UseBackingFile {
-		return multistep.ActionContinue
+	if len(s.AdditionalDiskSize) > 0 || s.UseBackingFile {
+		ui.Say("Creating required virtual machine disks")
 	}
 
-	var diskFullPaths, diskSizes []string
-
-	ui.Say("Creating required virtual machine disks")
 	// The 'main' or 'default' disk
-	diskFullPaths = append(diskFullPaths, filepath.Join(config.OutputDir, name))
-	diskSizes = append(diskSizes, config.DiskSize)
+	diskFullPaths := []string{filepath.Join(s.OutputDir, name)}
+	diskSizes := []string{s.DiskSize}
+
 	// Additional disks
-	if len(config.AdditionalDiskSize) > 0 {
-		for i, diskSize := range config.AdditionalDiskSize {
-			path := filepath.Join(config.OutputDir, fmt.Sprintf("%s-%d", name, i+1))
+	if len(s.AdditionalDiskSize) > 0 {
+		for i, diskSize := range s.AdditionalDiskSize {
+			path := filepath.Join(s.OutputDir, fmt.Sprintf("%s-%d", name, i+1))
 			diskFullPaths = append(diskFullPaths, path)
-			size := diskSize
-			diskSizes = append(diskSizes, size)
+			diskSizes = append(diskSizes, diskSize)
 		}
 	}
 
 	// Create all required disks
 	for i, diskFullPath := range diskFullPaths {
+		if s.DiskImage && !s.UseBackingFile && i == 0 {
+			// Let the copy disk step (step_copy_disk.go) create the 'main' or
+			// 'default' disk.
+			continue
+		}
 		log.Printf("[INFO] Creating disk with Path: %s and Size: %s", diskFullPath, diskSizes[i])
-		command := []string{
-			"create",
-			"-f", config.Format,
-		}
 
-		if config.UseBackingFile && i == 0 {
-			isoPath := state.Get("iso_path").(string)
-			command = append(command, "-b", isoPath)
-		}
-
-		command = append(command,
-			diskFullPath,
-			diskSizes[i])
+		command := s.buildCreateCommand(diskFullPath, diskSizes[i], i, state)
 
 		if err := driver.QemuImg(command...); err != nil {
 			err := fmt.Errorf("Error creating hard drive: %s", err)
@@ -69,6 +68,24 @@ func (s *stepCreateDisk) Run(ctx context.Context, state multistep.StateBag) mult
 	state.Put("qemu_disk_paths", diskFullPaths)
 
 	return multistep.ActionContinue
+}
+
+func (s *stepCreateDisk) buildCreateCommand(path string, size string, i int, state multistep.StateBag) []string {
+	command := []string{"create", "-f", s.Format}
+
+	if s.DiskImage && s.UseBackingFile && i == 0 {
+		// Use a backing file for the 'main' or 'default' disk
+		isoPath := state.Get("iso_path").(string)
+		command = append(command, "-b", isoPath)
+	}
+
+	// add user-provided convert args
+	command = append(command, s.QemuImgArgs.Create...)
+
+	// add target path and size.
+	command = append(command, path, size)
+
+	return command
 }
 
 func (s *stepCreateDisk) Cleanup(state multistep.StateBag) {}

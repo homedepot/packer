@@ -8,9 +8,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/packer/tmp"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/tmp"
 )
 
 const (
@@ -47,7 +47,7 @@ func (s *StepMountFloppydrive) Run(ctx context.Context, state multistep.StateBag
 		return multistep.ActionHalt
 	}
 
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmName := state.Get("vmName").(string)
 
 	ui.Say("Mounting floppy drive...")
@@ -76,7 +76,7 @@ func (s *StepMountFloppydrive) Cleanup(state multistep.StateBag) {
 	errorMsg := "Error unmounting floppy drive: %s"
 
 	vmName := state.Get("vmName").(string)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	ui.Say("Cleanup floppy drive...")
 

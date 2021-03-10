@@ -8,16 +8,18 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/random"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
 	awscommon "github.com/hashicorp/packer/builder/amazon/common"
-	"github.com/hashicorp/packer/common/random"
-	"github.com/hashicorp/packer/common/retry"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/builder/amazon/common/awserrors"
 )
 
 type stepCreateAMI struct {
 	PollingConfig      *awscommon.AWSPollingConfig
 	image              *ec2.Image
+	AMISkipCreateImage bool
 	AMISkipBuildRegion bool
 }
 
@@ -25,7 +27,12 @@ func (s *stepCreateAMI) Run(ctx context.Context, state multistep.StateBag) multi
 	config := state.Get("config").(*Config)
 	ec2conn := state.Get("ec2").(*ec2.EC2)
 	instance := state.Get("instance").(*ec2.Instance)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
+
+	if s.AMISkipCreateImage {
+		ui.Say("Skipping AMI creation...")
+		return multistep.ActionContinue
+	}
 
 	// Create the image
 	amiName := config.AMIName
@@ -61,7 +68,7 @@ func (s *stepCreateAMI) Run(ctx context.Context, state multistep.StateBag) multi
 	err = retry.Config{
 		Tries: 0,
 		ShouldRetry: func(err error) bool {
-			if awscommon.IsAWSErr(err, "InvalidParameterValue", "Instance is not in state") {
+			if awserrors.Matches(err, "InvalidParameterValue", "Instance is not in state") {
 				return true
 			}
 			return false
@@ -143,7 +150,7 @@ func (s *stepCreateAMI) Cleanup(state multistep.StateBag) {
 	}
 
 	ec2conn := state.Get("ec2").(*ec2.EC2)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	ui.Say("Deregistering the AMI and deleting associated snapshots because " +
 		"of cancellation, or error...")

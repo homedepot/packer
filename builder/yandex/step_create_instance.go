@@ -7,10 +7,10 @@ import (
 	"io/ioutil"
 
 	"github.com/c2h5oh/datasize"
-	"github.com/hashicorp/packer/builder"
-	"github.com/hashicorp/packer/common/uuid"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/packerbuilderdata"
+	"github.com/hashicorp/packer-plugin-sdk/uuid"
 
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/compute/v1"
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/vpc/v1"
@@ -23,7 +23,7 @@ type StepCreateInstance struct {
 	Debug         bool
 	SerialLogFile string
 
-	GeneratedData *builder.GeneratedData
+	GeneratedData *packerbuilderdata.GeneratedData
 }
 
 func createNetwork(ctx context.Context, c *Config, d Driver) (*vpc.Network, error) {
@@ -54,6 +54,51 @@ func createNetwork(ctx context.Context, c *Config, d Driver) (*vpc.Network, erro
 		return nil, errors.New("network create operation response doesn't contain Network")
 	}
 	return network, nil
+}
+
+func createDisk(ctx context.Context, state multistep.StateBag, c *Config, d Driver, sourceImage *Image) (*compute.Disk, error) {
+	req := &compute.CreateDiskRequest{
+		Name:     c.DiskName,
+		FolderId: c.FolderID,
+		TypeId:   c.DiskType,
+		Labels:   c.DiskLabels,
+		ZoneId:   c.Zone,
+		Size:     int64((datasize.ByteSize(c.DiskSizeGb) * datasize.GB).Bytes()),
+		Source: &compute.CreateDiskRequest_ImageId{
+			ImageId: sourceImage.ID,
+		},
+	}
+	sdk := d.SDK()
+
+	op, err := sdk.WrapOperation(sdk.Compute().Disk().Create(ctx, req))
+	if err != nil {
+		return nil, err
+	}
+	protoMD, err := op.Metadata()
+	if err != nil {
+		return nil, err
+	}
+	md, ok := protoMD.(*compute.CreateDiskMetadata)
+	if !ok {
+		return nil, fmt.Errorf("could not get Instance ID from create operation metadata")
+	}
+	state.Put("disk_id", md.DiskId)
+
+	err = op.Wait(ctx)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := op.Response()
+	if err != nil {
+		return nil, err
+	}
+
+	disk, ok := resp.(*compute.Disk)
+	if !ok {
+		return nil, errors.New("disk create operation response doesn't contain Disk")
+	}
+	return disk, nil
+
 }
 
 func createSubnet(ctx context.Context, c *Config, d Driver, networkID string) (*vpc.Subnet, error) {
@@ -111,7 +156,7 @@ func getImage(ctx context.Context, c *Config, d Driver) (*Image, error) {
 
 func (s *StepCreateInstance) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	sdk := state.Get("sdk").(*ycsdk.SDK)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(Driver)
 
@@ -120,11 +165,11 @@ func (s *StepCreateInstance) Run(ctx context.Context, state multistep.StateBag) 
 
 	sourceImage, err := getImage(ctx, config, driver)
 	if err != nil {
-		return stepHaltWithError(state, fmt.Errorf("Error getting source image for instance creation: %s", err))
+		return StepHaltWithError(state, fmt.Errorf("Error getting source image for instance creation: %s", err))
 	}
 
 	if sourceImage.MinDiskSizeGb > config.DiskSizeGb {
-		return stepHaltWithError(state, fmt.Errorf("Instance DiskSizeGb (%d) should be equal or greater "+
+		return StepHaltWithError(state, fmt.Errorf("Instance DiskSizeGb (%d) should be equal or greater "+
 			"than SourceImage disk requirement (%d)", config.DiskSizeGb, sourceImage.MinDiskSizeGb))
 	}
 
@@ -137,14 +182,14 @@ func (s *StepCreateInstance) Run(ctx context.Context, state multistep.StateBag) 
 		ui.Say("Creating network...")
 		network, err := createNetwork(ctx, config, driver)
 		if err != nil {
-			return stepHaltWithError(state, fmt.Errorf("Error creating network: %s", err))
+			return StepHaltWithError(state, fmt.Errorf("Error creating network: %s", err))
 		}
 		state.Put("network_id", network.Id)
 
 		ui.Say(fmt.Sprintf("Creating subnet in zone %q...", config.Zone))
 		subnet, err := createSubnet(ctx, config, driver, network.Id)
 		if err != nil {
-			return stepHaltWithError(state, fmt.Errorf("Error creating subnet: %s", err))
+			return StepHaltWithError(state, fmt.Errorf("Error creating subnet: %s", err))
 		}
 		instanceSubnetID = subnet.Id
 		// save for cleanup
@@ -154,22 +199,32 @@ func (s *StepCreateInstance) Run(ctx context.Context, state multistep.StateBag) 
 		instanceSubnetID = config.SubnetID
 	}
 
+	// Create a disk manually to have a delete ID
+	ui.Say("Creating disk...")
+	disk, err := createDisk(ctx, state, config, driver, sourceImage)
+	if err != nil {
+		return StepHaltWithError(state, fmt.Errorf("Error creating disk: %s", err))
+	}
+
 	// Create an instance based on the configuration
 	ui.Say("Creating instance...")
 
 	instanceMetadata, err := config.createInstanceMetadata(string(config.Communicator.SSHPublicKey))
 	if err != nil {
-		return stepHaltWithError(state, fmt.Errorf("Error preparing instance metadata: %s", err))
+		return StepHaltWithError(state, fmt.Errorf("Error preparing instance metadata: %s", err))
 	}
 
-	// TODO make part metadata prepare process
 	if config.UseIPv6 {
-		// this ugly hack will replace user provided 'user-data'
-		userData := `#cloud-config
-runcmd:
-- [ sh, -c, '/sbin/dhclient -6 -D LL -nw -pf /run/dhclient_ipv6.eth0.pid -lf /var/lib/dhcp/dhclient_ipv6.eth0.leases eth0' ]
-`
-		instanceMetadata["user-data"] = userData
+		ui.Say("Prepare user-data...")
+
+		oldUserData, ok := instanceMetadata["user-data"]
+		if !ok {
+			oldUserData = ""
+		}
+		instanceMetadata["user-data"], err = MergeCloudUserMetaData(cloudInitIPv6Config, oldUserData)
+		if err != nil {
+			return StepHaltWithError(state, fmt.Errorf("Error merge user data configs: %s", err))
+		}
 	}
 
 	req := &compute.CreateInstanceRequest{
@@ -189,15 +244,8 @@ runcmd:
 		Metadata: instanceMetadata,
 		BootDiskSpec: &compute.AttachedDiskSpec{
 			AutoDelete: false,
-			Disk: &compute.AttachedDiskSpec_DiskSpec_{
-				DiskSpec: &compute.AttachedDiskSpec_DiskSpec{
-					Name:   config.DiskName,
-					TypeId: config.DiskType,
-					Size:   int64((datasize.ByteSize(config.DiskSizeGb) * datasize.GB).Bytes()),
-					Source: &compute.AttachedDiskSpec_DiskSpec_ImageId{
-						ImageId: sourceImage.ID,
-					},
-				},
+			Disk: &compute.AttachedDiskSpec_DiskId{
+				DiskId: disk.Id,
 			},
 		},
 		NetworkInterfaceSpecs: []*compute.NetworkInterfaceSpec{
@@ -226,43 +274,42 @@ runcmd:
 
 	op, err := sdk.WrapOperation(sdk.Compute().Instance().Create(ctx, req))
 	if err != nil {
-		return stepHaltWithError(state, fmt.Errorf("Error create instance: %s", err))
+		return StepHaltWithError(state, fmt.Errorf("Error create instance: %s", err))
 	}
 
 	opMetadata, err := op.Metadata()
 	if err != nil {
-		return stepHaltWithError(state, fmt.Errorf("Error get create operation metadata: %s", err))
+		return StepHaltWithError(state, fmt.Errorf("Error get create operation metadata: %s", err))
 	}
 
 	if cimd, ok := opMetadata.(*compute.CreateInstanceMetadata); ok {
 		state.Put("instance_id", cimd.InstanceId)
 	} else {
-		return stepHaltWithError(state, fmt.Errorf("could not get Instance ID from operation metadata"))
+		return StepHaltWithError(state, fmt.Errorf("could not get Instance ID from operation metadata"))
 	}
 
 	err = op.Wait(ctx)
 	if err != nil {
-		return stepHaltWithError(state, fmt.Errorf("Error create instance: %s", err))
+		return StepHaltWithError(state, fmt.Errorf("Error create instance: %s", err))
 	}
 
 	resp, err := op.Response()
 	if err != nil {
-		return stepHaltWithError(state, err)
+		return StepHaltWithError(state, err)
 	}
 
 	instance, ok := resp.(*compute.Instance)
 	if !ok {
-		return stepHaltWithError(state, fmt.Errorf("response doesn't contain Instance"))
+		return StepHaltWithError(state, fmt.Errorf("response doesn't contain Instance"))
 	}
 
-	state.Put("disk_id", instance.BootDisk.DiskId)
 	// instance_id is the generic term used so that users can have access to the
 	// instance id inside of the provisioners, used in step_provision.
 	state.Put("instance_id", instance.Id)
 
 	if s.Debug {
 		ui.Message(fmt.Sprintf("Instance ID %s started. Current instance status %s", instance.Id, instance.Status))
-		ui.Message(fmt.Sprintf("Disk ID %s. ", instance.BootDisk.DiskId))
+		ui.Message(fmt.Sprintf("Disk ID %s. ", disk.Id))
 	}
 
 	// provision generated_data from declared in Builder.Prepare func
@@ -279,14 +326,14 @@ runcmd:
 func (s *StepCreateInstance) Cleanup(state multistep.StateBag) {
 	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	ctx, cancel := context.WithTimeout(context.Background(), config.StateTimeout)
 	defer cancel()
 
 	if s.SerialLogFile != "" {
 		ui.Say("Current state 'cancelled' or 'halted'...")
-		err := s.writeSerialLogFile(ctx, state)
+		err := writeSerialLogFile(ctx, state, s.SerialLogFile)
 		if err != nil {
 			ui.Error(err.Error())
 		}
@@ -348,25 +395,6 @@ func (s *StepCreateInstance) Cleanup(state multistep.StateBag) {
 		}
 		ui.Message("Disk has been deleted!")
 	}
-}
-
-func (s *StepCreateInstance) writeSerialLogFile(ctx context.Context, state multistep.StateBag) error {
-	sdk := state.Get("sdk").(*ycsdk.SDK)
-	ui := state.Get("ui").(packer.Ui)
-
-	instanceID := state.Get("instance_id").(string)
-	ui.Say("Try get instance's serial port output and write to file " + s.SerialLogFile)
-	serialOutput, err := sdk.Compute().Instance().GetSerialPortOutput(ctx, &compute.GetInstanceSerialPortOutputRequest{
-		InstanceId: instanceID,
-	})
-	if err != nil {
-		return fmt.Errorf("Failed to get serial port output for instance (id: %s): %s", instanceID, err)
-	}
-	if err := ioutil.WriteFile(s.SerialLogFile, []byte(serialOutput.Contents), 0600); err != nil {
-		return fmt.Errorf("Failed to write serial port output to file: %s", err)
-	}
-	ui.Message("Serial port output has been successfully written")
-	return nil
 }
 
 func (c *Config) createInstanceMetadata(sshPublicKey string) (map[string]string, error) {

@@ -12,106 +12,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/packer/plugin"
 )
-
-func newConfig() config {
-	var conf config
-	conf.PluginMinPort = 10000
-	conf.PluginMaxPort = 25000
-	conf.Builders = packer.MapOfBuilder{}
-	conf.PostProcessors = packer.MapOfPostProcessor{}
-	conf.Provisioners = packer.MapOfProvisioner{}
-
-	return conf
-}
-func TestDiscoverReturnsIfMagicCookieSet(t *testing.T) {
-	config := newConfig()
-
-	os.Setenv(plugin.MagicCookieKey, plugin.MagicCookieValue)
-	defer os.Unsetenv(plugin.MagicCookieKey)
-
-	err := config.Discover()
-	if err != nil {
-		t.Fatalf("Should not have errored: %s", err)
-	}
-
-	if len(config.Builders) != 0 {
-		t.Fatalf("Should not have tried to find builders")
-	}
-}
-
-func TestEnvVarPackerPluginPath(t *testing.T) {
-	// Create a temporary directory to store plugins in
-	dir, _, cleanUpFunc, err := generateFakePlugins("custom_plugin_dir",
-		[]string{"packer-provisioner-partyparrot"})
-	if err != nil {
-		t.Fatalf("Error creating fake custom plugins: %s", err)
-	}
-
-	defer cleanUpFunc()
-
-	// Add temp dir to path.
-	os.Setenv("PACKER_PLUGIN_PATH", dir)
-	defer os.Unsetenv("PACKER_PLUGIN_PATH")
-
-	config := newConfig()
-
-	err = config.Discover()
-	if err != nil {
-		t.Fatalf("Should not have errored: %s", err)
-	}
-
-	if len(config.Provisioners) == 0 {
-		t.Fatalf("Should have found partyparrot provisioner")
-	}
-	if _, ok := config.Provisioners["partyparrot"]; !ok {
-		t.Fatalf("Should have found partyparrot provisioner.")
-	}
-}
-
-func TestEnvVarPackerPluginPath_MultiplePaths(t *testing.T) {
-	// Create a temporary directory to store plugins in
-	dir, _, cleanUpFunc, err := generateFakePlugins("custom_plugin_dir",
-		[]string{"packer-provisioner-partyparrot"})
-	if err != nil {
-		t.Fatalf("Error creating fake custom plugins: %s", err)
-	}
-
-	defer cleanUpFunc()
-
-	pathsep := ":"
-	if runtime.GOOS == "windows" {
-		pathsep = ";"
-	}
-
-	// Create a second dir to look in that will be empty
-	decoyDir, err := ioutil.TempDir("", "decoy")
-	if err != nil {
-		t.Fatalf("Failed to create a temporary test dir.")
-	}
-	defer os.Remove(decoyDir)
-
-	pluginPath := dir + pathsep + decoyDir
-
-	// Add temp dir to path.
-	os.Setenv("PACKER_PLUGIN_PATH", pluginPath)
-	defer os.Unsetenv("PACKER_PLUGIN_PATH")
-
-	config := newConfig()
-
-	err = config.Discover()
-	if err != nil {
-		t.Fatalf("Should not have errored: %s", err)
-	}
-
-	if len(config.Provisioners) == 0 {
-		t.Fatalf("Should have found partyparrot provisioner")
-	}
-	if _, ok := config.Provisioners["partyparrot"]; !ok {
-		t.Fatalf("Should have found partyparrot provisioner.")
-	}
-}
 
 func TestDecodeConfig(t *testing.T) {
 
@@ -147,10 +48,13 @@ func TestLoadExternalComponentsFromConfig(t *testing.T) {
 	}
 	defer cleanUpFunc()
 
-	var cfg config
-	cfg.Builders = packer.MapOfBuilder{}
-	cfg.PostProcessors = packer.MapOfPostProcessor{}
-	cfg.Provisioners = packer.MapOfProvisioner{}
+	cfg := config{
+		Plugins: &packer.PluginConfig{
+			Builders:       packer.MapOfBuilder{},
+			PostProcessors: packer.MapOfPostProcessor{},
+			Provisioners:   packer.MapOfProvisioner{},
+		},
+	}
 
 	if err := decodeConfig(strings.NewReader(packerConfigData), &cfg); err != nil {
 		t.Fatalf("error encountered decoding configuration: %v", err)
@@ -158,16 +62,16 @@ func TestLoadExternalComponentsFromConfig(t *testing.T) {
 
 	cfg.LoadExternalComponentsFromConfig()
 
-	if len(cfg.Builders) != 1 || !cfg.Builders.Has("cloud-xyz") {
-		t.Errorf("failed to load external builders; got %v as the resulting config", cfg.Builders)
+	if len(cfg.Plugins.Builders.List()) != 1 || !cfg.Plugins.Builders.Has("cloud-xyz") {
+		t.Errorf("failed to load external builders; got %v as the resulting config", cfg.Plugins.Builders)
 	}
 
-	if len(cfg.PostProcessors) != 1 || !cfg.PostProcessors.Has("noop") {
-		t.Errorf("failed to load external post-processors; got %v as the resulting config", cfg.PostProcessors)
+	if len(cfg.Plugins.PostProcessors.List()) != 1 || !cfg.Plugins.PostProcessors.Has("noop") {
+		t.Errorf("failed to load external post-processors; got %v as the resulting config", cfg.Plugins.PostProcessors)
 	}
 
-	if len(cfg.Provisioners) != 1 || !cfg.Provisioners.Has("super-shell") {
-		t.Errorf("failed to load external provisioners; got %v as the resulting config", cfg.Provisioners)
+	if len(cfg.Plugins.Provisioners.List()) != 1 || !cfg.Plugins.Provisioners.Has("super-shell") {
+		t.Errorf("failed to load external provisioners; got %v as the resulting config", cfg.Plugins.Provisioners)
 	}
 
 }
@@ -179,8 +83,13 @@ func TestLoadExternalComponentsFromConfig_onlyProvisioner(t *testing.T) {
 	}
 	defer cleanUpFunc()
 
-	var cfg config
-	cfg.Provisioners = packer.MapOfProvisioner{}
+	cfg := config{
+		Plugins: &packer.PluginConfig{
+			Builders:       packer.MapOfBuilder{},
+			PostProcessors: packer.MapOfPostProcessor{},
+			Provisioners:   packer.MapOfProvisioner{},
+		},
+	}
 
 	if err := decodeConfig(strings.NewReader(packerConfigData), &cfg); err != nil {
 		t.Fatalf("error encountered decoding configuration: %v", err)
@@ -194,16 +103,16 @@ func TestLoadExternalComponentsFromConfig_onlyProvisioner(t *testing.T) {
 
 	cfg.LoadExternalComponentsFromConfig()
 
-	if len(cfg.Builders) != 0 {
-		t.Errorf("loaded external builders when it wasn't supposed to; got %v as the resulting config", cfg.Builders)
+	if len(cfg.Plugins.Builders.List()) != 0 {
+		t.Errorf("loaded external builders when it wasn't supposed to; got %v as the resulting config", cfg.Plugins.Builders)
 	}
 
-	if len(cfg.PostProcessors) != 0 {
-		t.Errorf("loaded external post-processors when it wasn't supposed to; got %v as the resulting config", cfg.PostProcessors)
+	if len(cfg.Plugins.PostProcessors.List()) != 0 {
+		t.Errorf("loaded external post-processors when it wasn't supposed to; got %v as the resulting config", cfg.Plugins.PostProcessors)
 	}
 
-	if len(cfg.Provisioners) != 1 || !cfg.Provisioners.Has("super-shell") {
-		t.Errorf("failed to load external provisioners; got %v as the resulting config", cfg.Provisioners)
+	if len(cfg.Plugins.Provisioners.List()) != 1 || !cfg.Plugins.Provisioners.Has("super-shell") {
+		t.Errorf("failed to load external provisioners; got %v as the resulting config", cfg.Plugins.Provisioners)
 	}
 }
 
@@ -224,10 +133,13 @@ func TestLoadSingleComponent(t *testing.T) {
 		{pluginPath: "./non-existing-file", errorExpected: true},
 	}
 
-	var cfg config
-	cfg.Builders = packer.MapOfBuilder{}
-	cfg.PostProcessors = packer.MapOfPostProcessor{}
-	cfg.Provisioners = packer.MapOfProvisioner{}
+	cfg := config{
+		Plugins: &packer.PluginConfig{
+			Builders:       packer.MapOfBuilder{},
+			PostProcessors: packer.MapOfPostProcessor{},
+			Provisioners:   packer.MapOfProvisioner{},
+		},
+	}
 
 	for _, tc := range tt {
 		tc := tc

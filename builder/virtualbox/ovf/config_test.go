@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func testConfig(t *testing.T) map[string]interface{} {
@@ -32,7 +32,7 @@ func getTempFile(t *testing.T) *os.File {
 
 func TestNewConfig_FloppyFiles(t *testing.T) {
 	cfg := testConfig(t)
-	floppies_path := "../../../common/test-fixtures/floppies"
+	floppies_path := "../../test-fixtures/floppies"
 	cfg["floppy_files"] = []string{fmt.Sprintf("%s/bar.bat", floppies_path), fmt.Sprintf("%s/foo.ps1", floppies_path)}
 	var c Config
 	_, err := c.Prepare(cfg)
@@ -50,7 +50,7 @@ func TestNewConfig_InvalidFloppies(t *testing.T) {
 		t.Fatalf("Nonexistent floppies should trigger multierror")
 	}
 
-	if len(errs.(*packer.MultiError).Errors) != 2 {
+	if len(errs.(*packersdk.MultiError).Errors) != 2 {
 		t.Fatalf("Multierror should work and report 2 errors")
 	}
 }

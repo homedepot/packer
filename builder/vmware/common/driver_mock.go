@@ -4,7 +4,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 )
 
 type DriverMock struct {
@@ -14,6 +14,7 @@ type DriverMock struct {
 	CloneDst    string
 	CloneSrc    string
 	Linked      bool
+	Snapshot    string
 	CloneErr    error
 
 	CompactDiskCalled bool
@@ -95,6 +96,8 @@ type DriverMock struct {
 
 	VerifyCalled bool
 	VerifyErr    error
+
+	VerifyOvftoolCalled bool
 }
 
 type NetworkMapperMock struct {
@@ -111,11 +114,12 @@ func (m NetworkMapperMock) DeviceIntoName(device string) (string, error) {
 	return "", nil
 }
 
-func (d *DriverMock) Clone(dst string, src string, linked bool) error {
+func (d *DriverMock) Clone(dst string, src string, linked bool, snapshot string) error {
 	d.CloneCalled = true
 	d.CloneDst = dst
 	d.CloneSrc = src
 	d.Linked = linked
+	d.Snapshot = snapshot
 	return d.CloneErr
 }
 
@@ -278,4 +282,8 @@ func (d *DriverMock) GetVmwareDriver() VmwareDriver {
 		return NetworkMapperMock{}, nil
 	}
 	return state
+}
+
+func (d *DriverMock) VerifyOvfTool(_ bool, _ bool) error {
+	return nil
 }

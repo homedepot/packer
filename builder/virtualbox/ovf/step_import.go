@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	vboxcommon "github.com/hashicorp/packer/builder/virtualbox/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 // This step imports an OVF VM into VirtualBox.
@@ -20,7 +20,7 @@ type StepImport struct {
 
 func (s *StepImport) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(vboxcommon.Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmPath := state.Get("vm_path").(string)
 
 	ui.Say(fmt.Sprintf("Importing VM: %s", vmPath))
@@ -42,7 +42,7 @@ func (s *StepImport) Cleanup(state multistep.StateBag) {
 	}
 
 	driver := state.Get("driver").(vboxcommon.Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	_, cancelled := state.GetOk(multistep.StateCancelled)
 	_, halted := state.GetOk(multistep.StateHalted)

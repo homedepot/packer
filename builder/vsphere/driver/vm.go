@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/nfc"
 	"github.com/vmware/govmomi/object"
@@ -21,9 +21,50 @@ import (
 	"github.com/vmware/govmomi/vim25/types"
 )
 
-type VirtualMachine struct {
+type VirtualMachine interface {
+	Info(params ...string) (*mo.VirtualMachine, error)
+	Devices() (object.VirtualDeviceList, error)
+	FloppyDevices() (object.VirtualDeviceList, error)
+	Clone(ctx context.Context, config *CloneConfig) (VirtualMachine, error)
+	updateVAppConfig(ctx context.Context, newProps map[string]string) (*types.VmConfigSpec, error)
+	AddPublicKeys(ctx context.Context, publicKeys string) error
+	Properties(ctx context.Context) (*mo.VirtualMachine, error)
+	Destroy() error
+	Configure(config *HardwareConfig) error
+	Customize(spec types.CustomizationSpec) error
+	ResizeDisk(diskSize int64) error
+	WaitForIP(ctx context.Context, ipNet *net.IPNet) (string, error)
+	PowerOn() error
+	PowerOff() error
+	IsPoweredOff() (bool, error)
+	StartShutdown() error
+	WaitForShutdown(ctx context.Context, timeout time.Duration) error
+	CreateSnapshot(name string) error
+	ConvertToTemplate() error
+	ImportOvfToContentLibrary(ovf vcenter.OVF) error
+	ImportToContentLibrary(template vcenter.Template) error
+	GetDir() (string, error)
+	AddFloppy(imgPath string) error
+	SetBootOrder(order []string) error
+	RemoveDevice(keepFiles bool, device ...types.BaseVirtualDevice) error
+	addDevice(device types.BaseVirtualDevice) error
+	AddConfigParams(params map[string]string, info *types.ToolsConfigInfo) error
+	Export() (*nfc.Lease, error)
+	CreateDescriptor(m *ovf.Manager, cdp types.OvfCreateDescriptorParams) (*types.OvfCreateDescriptorResult, error)
+	NewOvfManager() *ovf.Manager
+	GetOvfExportOptions(m *ovf.Manager) ([]types.OvfOptionInfo, error)
+
+	AddCdrom(controllerType string, datastoreIsoPath string) error
+	CreateCdrom(c *types.VirtualController) (*types.VirtualCdrom, error)
+	RemoveCdroms() error
+	EjectCdroms() error
+	AddSATAController() error
+	FindSATAController() (*types.VirtualAHCIController, error)
+}
+
+type VirtualMachineDriver struct {
 	vm     *object.VirtualMachine
-	driver *Driver
+	driver *VCenterDriver
 }
 
 type CloneConfig struct {
@@ -35,8 +76,10 @@ type CloneConfig struct {
 	Datastore      string
 	LinkedClone    bool
 	Network        string
+	MacAddress     string
 	Annotation     string
 	VAppProperties map[string]string
+	StorageConfig  StorageConfig
 }
 
 type HardwareConfig struct {
@@ -64,8 +107,6 @@ type NIC struct {
 }
 
 type CreateConfig struct {
-	DiskControllerType []string // example: "scsi", "pvscsi", "lsilogic"
-
 	Annotation    string
 	Name          string
 	Folder        string
@@ -77,35 +118,28 @@ type CreateConfig struct {
 	NICs          []NIC
 	USBController []string
 	Version       uint // example: 10
-	Storage       []Disk
+	StorageConfig StorageConfig
 }
 
-type Disk struct {
-	DiskSize            int64
-	DiskEagerlyScrub    bool
-	DiskThinProvisioned bool
-	ControllerIndex     int
-}
-
-func (d *Driver) NewVM(ref *types.ManagedObjectReference) *VirtualMachine {
-	return &VirtualMachine{
+func (d *VCenterDriver) NewVM(ref *types.ManagedObjectReference) VirtualMachine {
+	return &VirtualMachineDriver{
 		vm:     object.NewVirtualMachine(d.client.Client, *ref),
 		driver: d,
 	}
 }
 
-func (d *Driver) FindVM(name string) (*VirtualMachine, error) {
+func (d *VCenterDriver) FindVM(name string) (VirtualMachine, error) {
 	vm, err := d.finder.VirtualMachine(d.ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	return &VirtualMachine{
+	return &VirtualMachineDriver{
 		vm:     vm,
 		driver: d,
 	}, nil
 }
 
-func (d *Driver) PreCleanVM(ui packer.Ui, vmPath string, force bool) error {
+func (d *VCenterDriver) PreCleanVM(ui packersdk.Ui, vmPath string, force bool) error {
 	vm, err := d.FindVM(vmPath)
 	if err != nil {
 		if _, ok := err.(*find.NotFoundError); !ok {
@@ -130,7 +164,7 @@ func (d *Driver) PreCleanVM(ui packer.Ui, vmPath string, force bool) error {
 	return nil
 }
 
-func (d *Driver) CreateVM(config *CreateConfig) (*VirtualMachine, error) {
+func (d *VCenterDriver) CreateVM(config *CreateConfig) (VirtualMachine, error) {
 	createSpec := types.VirtualMachineConfigSpec{
 		Name:       config.Name,
 		Annotation: config.Annotation,
@@ -165,11 +199,12 @@ func (d *Driver) CreateVM(config *CreateConfig) (*VirtualMachine, error) {
 	}
 
 	devices := object.VirtualDeviceList{}
-
-	devices, err = addDisk(d, devices, config)
+	storageConfigSpec, err := config.StorageConfig.AddStorageDevices(devices)
 	if err != nil {
 		return nil, err
 	}
+	createSpec.DeviceChange = append(createSpec.DeviceChange, storageConfigSpec...)
+
 	devices, err = addNetwork(d, devices, config)
 	if err != nil {
 		return nil, err
@@ -193,10 +228,11 @@ func (d *Driver) CreateVM(config *CreateConfig) (*VirtualMachine, error) {
 		devices = append(devices, usb)
 	}
 
-	createSpec.DeviceChange, err = devices.ConfigSpec(types.VirtualDeviceConfigSpecOperationAdd)
+	devicesConfigSpec, err := devices.ConfigSpec(types.VirtualDeviceConfigSpecOperationAdd)
 	if err != nil {
 		return nil, err
 	}
+	createSpec.DeviceChange = append(createSpec.DeviceChange, devicesConfigSpec...)
 
 	createSpec.Files = &types.VirtualMachineFileInfo{
 		VmPathName: fmt.Sprintf("[%s]", datastore.Name()),
@@ -219,7 +255,7 @@ func (d *Driver) CreateVM(config *CreateConfig) (*VirtualMachine, error) {
 	return d.NewVM(&vmRef), nil
 }
 
-func (vm *VirtualMachine) Info(params ...string) (*mo.VirtualMachine, error) {
+func (vm *VirtualMachineDriver) Info(params ...string) (*mo.VirtualMachine, error) {
 	var p []string
 	if len(params) == 0 {
 		p = []string{"*"}
@@ -234,7 +270,7 @@ func (vm *VirtualMachine) Info(params ...string) (*mo.VirtualMachine, error) {
 	return &info, nil
 }
 
-func (vm *VirtualMachine) Devices() (object.VirtualDeviceList, error) {
+func (vm *VirtualMachineDriver) Devices() (object.VirtualDeviceList, error) {
 	vmInfo, err := vm.Info("config.hardware.device")
 	if err != nil {
 		return nil, err
@@ -243,26 +279,35 @@ func (vm *VirtualMachine) Devices() (object.VirtualDeviceList, error) {
 	return vmInfo.Config.Hardware.Device, nil
 }
 
-func (vm *VirtualMachine) Clone(ctx context.Context, config *CloneConfig) (*VirtualMachine, error) {
+func (vm *VirtualMachineDriver) FloppyDevices() (object.VirtualDeviceList, error) {
+	device, err := vm.Devices()
+	if err != nil {
+		return device, err
+	}
+	floppies := device.SelectByType((*types.VirtualFloppy)(nil))
+	return floppies, nil
+}
+
+func (vm *VirtualMachineDriver) Clone(ctx context.Context, config *CloneConfig) (VirtualMachine, error) {
 	folder, err := vm.driver.FindFolder(config.Folder)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Error finding filder: %s", err)
 	}
 
 	var relocateSpec types.VirtualMachineRelocateSpec
 
 	pool, err := vm.driver.FindResourcePool(config.Cluster, config.Host, config.ResourcePool)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Error finding resource pool: %s", err)
 	}
 	poolRef := pool.pool.Reference()
 	relocateSpec.Pool = &poolRef
 
 	datastore, err := vm.driver.FindDatastore(config.Datastore, config.Host)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Error finding datastore: %s", err)
 	}
-	datastoreRef := datastore.ds.Reference()
+	datastoreRef := datastore.Reference()
 	relocateSpec.Datastore = &datastoreRef
 
 	var cloneSpec types.VirtualMachineCloneSpec
@@ -274,7 +319,7 @@ func (vm *VirtualMachine) Clone(ctx context.Context, config *CloneConfig) (*Virt
 
 		tpl, err := vm.Info("snapshot")
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Error getting snapshot info for vm: %s", err)
 		}
 		if tpl.Snapshot == nil {
 			err = errors.New("`linked_clone=true`, but template has no snapshots")
@@ -290,27 +335,47 @@ func (vm *VirtualMachine) Clone(ctx context.Context, config *CloneConfig) (*Virt
 		configSpec.Annotation = config.Annotation
 	}
 
+	devices, err := vm.vm.Device(vm.driver.ctx)
+	if err != nil {
+		return nil, err
+	}
+	virtualDisks := devices.SelectByType((*types.VirtualDisk)(nil))
+	virtualControllers := devices.SelectByType((*types.VirtualController)(nil))
+
+	// Use existing devices to avoid overlapping configuration
+	existingDevices := object.VirtualDeviceList{}
+	existingDevices = append(existingDevices, virtualDisks...)
+	existingDevices = append(existingDevices, virtualControllers...)
+
+	storageConfigSpec, err := config.StorageConfig.AddStorageDevices(existingDevices)
+	if err != nil {
+		return nil, err
+	}
+	configSpec.DeviceChange = append(configSpec.DeviceChange, storageConfigSpec...)
+
 	if config.Network != "" {
 		net, err := vm.driver.FindNetwork(config.Network)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Error finding network: %s", err)
 		}
 		backing, err := net.network.EthernetCardBackingInfo(ctx)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Error finding ethernet card backing info: %s", err)
 		}
 
 		devices, err := vm.vm.Device(ctx)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Error finding vm devices: %s", err)
 		}
 
 		adapter, err := findNetworkAdapter(devices)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Error finding network adapter: %s", err)
 		}
 
-		adapter.GetVirtualEthernetCard().Backing = backing
+		current := adapter.GetVirtualEthernetCard()
+		current.Backing = backing
+		current.MacAddress = config.MacAddress
 
 		config := &types.VirtualDeviceConfigSpec{
 			Device:    adapter.(types.BaseVirtualDevice),
@@ -322,13 +387,13 @@ func (vm *VirtualMachine) Clone(ctx context.Context, config *CloneConfig) (*Virt
 
 	vAppConfig, err := vm.updateVAppConfig(ctx, config.VAppProperties)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Error updating VAppConfig: %s", err)
 	}
 	configSpec.VAppConfig = vAppConfig
 
 	task, err := vm.vm.Clone(vm.driver.ctx, folder.folder, config.Name, cloneSpec)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Error calling vm.vm.Clone task: %s", err)
 	}
 
 	info, err := task.WaitForResult(ctx, nil)
@@ -338,7 +403,7 @@ func (vm *VirtualMachine) Clone(ctx context.Context, config *CloneConfig) (*Virt
 			return nil, err
 		}
 
-		return nil, err
+		return nil, fmt.Errorf("Error waiting for vm Clone to complete: %s", err)
 	}
 
 	vmRef, ok := info.Result.(types.ManagedObjectReference)
@@ -350,7 +415,7 @@ func (vm *VirtualMachine) Clone(ctx context.Context, config *CloneConfig) (*Virt
 	return created, nil
 }
 
-func (vm *VirtualMachine) updateVAppConfig(ctx context.Context, newProps map[string]string) (*types.VmConfigSpec, error) {
+func (vm *VirtualMachineDriver) updateVAppConfig(ctx context.Context, newProps map[string]string) (*types.VmConfigSpec, error) {
 	if len(newProps) == 0 {
 		return nil, nil
 	}
@@ -398,7 +463,7 @@ func (vm *VirtualMachine) updateVAppConfig(ctx context.Context, newProps map[str
 	}, nil
 }
 
-func (vm *VirtualMachine) AddPublicKeys(ctx context.Context, publicKeys string) error {
+func (vm *VirtualMachineDriver) AddPublicKeys(ctx context.Context, publicKeys string) error {
 	newProps := map[string]string{"public-keys": publicKeys}
 	config, err := vm.updateVAppConfig(ctx, newProps)
 	if err != nil {
@@ -415,7 +480,7 @@ func (vm *VirtualMachine) AddPublicKeys(ctx context.Context, publicKeys string) 
 	return err
 }
 
-func (vm *VirtualMachine) Properties(ctx context.Context) (*mo.VirtualMachine, error) {
+func (vm *VirtualMachineDriver) Properties(ctx context.Context) (*mo.VirtualMachine, error) {
 	log.Printf("fetching properties for VM %q", vm.vm.InventoryPath)
 	var props mo.VirtualMachine
 	if err := vm.vm.Properties(ctx, vm.vm.Reference(), nil, &props); err != nil {
@@ -424,7 +489,7 @@ func (vm *VirtualMachine) Properties(ctx context.Context) (*mo.VirtualMachine, e
 	return &props, nil
 }
 
-func (vm *VirtualMachine) Destroy() error {
+func (vm *VirtualMachineDriver) Destroy() error {
 	task, err := vm.vm.Destroy(vm.driver.ctx)
 	if err != nil {
 		return err
@@ -433,7 +498,7 @@ func (vm *VirtualMachine) Destroy() error {
 	return err
 }
 
-func (vm *VirtualMachine) Configure(config *HardwareConfig) error {
+func (vm *VirtualMachineDriver) Configure(config *HardwareConfig) error {
 	var confSpec types.VirtualMachineConfigSpec
 	confSpec.NumCPUs = config.CPUs
 	confSpec.NumCoresPerSocket = config.CpuCores
@@ -524,7 +589,7 @@ func (vm *VirtualMachine) Configure(config *HardwareConfig) error {
 	return err
 }
 
-func (vm *VirtualMachine) Customize(spec types.CustomizationSpec) error {
+func (vm *VirtualMachineDriver) Customize(spec types.CustomizationSpec) error {
 	task, err := vm.vm.Customize(vm.driver.ctx, spec)
 	if err != nil {
 		return err
@@ -532,7 +597,7 @@ func (vm *VirtualMachine) Customize(spec types.CustomizationSpec) error {
 	return task.Wait(vm.driver.ctx)
 }
 
-func (vm *VirtualMachine) ResizeDisk(diskSize int64) error {
+func (vm *VirtualMachineDriver) ResizeDisk(diskSize int64) error {
 	var confSpec types.VirtualMachineConfigSpec
 
 	devices, err := vm.vm.Device(vm.driver.ctx)
@@ -563,25 +628,7 @@ func (vm *VirtualMachine) ResizeDisk(diskSize int64) error {
 	return err
 }
 
-func findDisk(devices object.VirtualDeviceList) (*types.VirtualDisk, error) {
-	var disks []*types.VirtualDisk
-	for _, device := range devices {
-		switch d := device.(type) {
-		case *types.VirtualDisk:
-			disks = append(disks, d)
-		}
-	}
-
-	switch len(disks) {
-	case 0:
-		return nil, errors.New("VM has no disks")
-	case 1:
-		return disks[0], nil
-	}
-	return nil, errors.New("VM has multiple disks")
-}
-
-func (vm *VirtualMachine) PowerOn() error {
+func (vm *VirtualMachineDriver) PowerOn() error {
 	task, err := vm.vm.PowerOn(vm.driver.ctx)
 	if err != nil {
 		return err
@@ -590,7 +637,7 @@ func (vm *VirtualMachine) PowerOn() error {
 	return err
 }
 
-func (vm *VirtualMachine) WaitForIP(ctx context.Context, ipNet *net.IPNet) (string, error) {
+func (vm *VirtualMachineDriver) WaitForIP(ctx context.Context, ipNet *net.IPNet) (string, error) {
 	netIP, err := vm.vm.WaitForNetIP(ctx, false)
 	if err != nil {
 		return "", err
@@ -611,10 +658,11 @@ func (vm *VirtualMachine) WaitForIP(ctx context.Context, ipNet *net.IPNet) (stri
 		}
 	}
 
-	return "", fmt.Errorf("unable to find an IP")
+	// unable to find an IP
+	return "", nil
 }
 
-func (vm *VirtualMachine) PowerOff() error {
+func (vm *VirtualMachineDriver) PowerOff() error {
 	state, err := vm.vm.PowerState(vm.driver.ctx)
 	if err != nil {
 		return err
@@ -632,7 +680,7 @@ func (vm *VirtualMachine) PowerOff() error {
 	return err
 }
 
-func (vm *VirtualMachine) IsPoweredOff() (bool, error) {
+func (vm *VirtualMachineDriver) IsPoweredOff() (bool, error) {
 	state, err := vm.vm.PowerState(vm.driver.ctx)
 	if err != nil {
 		return false, err
@@ -641,12 +689,12 @@ func (vm *VirtualMachine) IsPoweredOff() (bool, error) {
 	return state == types.VirtualMachinePowerStatePoweredOff, nil
 }
 
-func (vm *VirtualMachine) StartShutdown() error {
+func (vm *VirtualMachineDriver) StartShutdown() error {
 	err := vm.vm.ShutdownGuest(vm.driver.ctx)
 	return err
 }
 
-func (vm *VirtualMachine) WaitForShutdown(ctx context.Context, timeout time.Duration) error {
+func (vm *VirtualMachineDriver) WaitForShutdown(ctx context.Context, timeout time.Duration) error {
 	shutdownTimer := time.After(timeout)
 	for {
 		off, err := vm.IsPoweredOff()
@@ -670,7 +718,7 @@ func (vm *VirtualMachine) WaitForShutdown(ctx context.Context, timeout time.Dura
 	return nil
 }
 
-func (vm *VirtualMachine) CreateSnapshot(name string) error {
+func (vm *VirtualMachineDriver) CreateSnapshot(name string) error {
 	task, err := vm.vm.CreateSnapshot(vm.driver.ctx, name, "", false, false)
 	if err != nil {
 		return err
@@ -679,11 +727,11 @@ func (vm *VirtualMachine) CreateSnapshot(name string) error {
 	return err
 }
 
-func (vm *VirtualMachine) ConvertToTemplate() error {
+func (vm *VirtualMachineDriver) ConvertToTemplate() error {
 	return vm.vm.MarkAsTemplate(vm.driver.ctx)
 }
 
-func (vm *VirtualMachine) ImportOvfToContentLibrary(ovf vcenter.OVF) error {
+func (vm *VirtualMachineDriver) ImportOvfToContentLibrary(ovf vcenter.OVF) error {
 	err := vm.driver.restClient.Login(vm.driver.ctx)
 	if err != nil {
 		return err
@@ -717,7 +765,7 @@ func (vm *VirtualMachine) ImportOvfToContentLibrary(ovf vcenter.OVF) error {
 	return vm.driver.restClient.Logout(vm.driver.ctx)
 }
 
-func (vm *VirtualMachine) ImportToContentLibrary(template vcenter.Template) error {
+func (vm *VirtualMachineDriver) ImportToContentLibrary(template vcenter.Template) error {
 	err := vm.driver.restClient.Login(vm.driver.ctx)
 	if err != nil {
 		return err
@@ -769,7 +817,7 @@ func (vm *VirtualMachine) ImportToContentLibrary(template vcenter.Template) erro
 		if err != nil {
 			return err
 		}
-		template.VMHomeStorage.Datastore = d.ds.Reference().Value
+		template.VMHomeStorage.Datastore = d.Reference().Value
 	}
 
 	vcm := vcenter.NewManager(vm.driver.restClient.client)
@@ -781,7 +829,7 @@ func (vm *VirtualMachine) ImportToContentLibrary(template vcenter.Template) erro
 	return vm.driver.restClient.Logout(vm.driver.ctx)
 }
 
-func (vm *VirtualMachine) GetDir() (string, error) {
+func (vm *VirtualMachineDriver) GetDir() (string, error) {
 	vmInfo, err := vm.Info("name", "layoutEx.file")
 	if err != nil {
 		return "", err
@@ -789,57 +837,14 @@ func (vm *VirtualMachine) GetDir() (string, error) {
 
 	vmxName := fmt.Sprintf("/%s.vmx", vmInfo.Name)
 	for _, file := range vmInfo.LayoutEx.File {
-		if strings.HasSuffix(file.Name, vmxName) {
+		if strings.Contains(file.Name, vmInfo.Name) {
 			return RemoveDatastorePrefix(file.Name[:len(file.Name)-len(vmxName)]), nil
 		}
 	}
 	return "", fmt.Errorf("cannot find '%s'", vmxName)
 }
 
-func addDisk(_ *Driver, devices object.VirtualDeviceList, config *CreateConfig) (object.VirtualDeviceList, error) {
-	if len(config.Storage) == 0 {
-		return nil, errors.New("no storage devices have been defined")
-	}
-
-	if len(config.DiskControllerType) == 0 {
-		return nil, errors.New("no controllers have been defined")
-	}
-
-	var controllers []types.BaseVirtualController
-	for _, controllerType := range config.DiskControllerType {
-		device, err := devices.CreateSCSIController(controllerType)
-		if err != nil {
-			return nil, err
-		}
-		devices = append(devices, device)
-		controller, err := devices.FindDiskController(devices.Name(device))
-		if err != nil {
-			return nil, err
-		}
-		controllers = append(controllers, controller)
-	}
-
-	for _, dc := range config.Storage {
-		disk := &types.VirtualDisk{
-			VirtualDevice: types.VirtualDevice{
-				Key: devices.NewKey(),
-				Backing: &types.VirtualDiskFlatVer2BackingInfo{
-					DiskMode:        string(types.VirtualDiskModePersistent),
-					ThinProvisioned: types.NewBool(dc.DiskThinProvisioned),
-					EagerlyScrub:    types.NewBool(dc.DiskEagerlyScrub),
-				},
-			},
-			CapacityInKB: dc.DiskSize * 1024,
-		}
-
-		devices.AssignController(disk, controllers[dc.ControllerIndex])
-		devices = append(devices, disk)
-	}
-
-	return devices, nil
-}
-
-func addNetwork(d *Driver, devices object.VirtualDeviceList, config *CreateConfig) (object.VirtualDeviceList, error) {
+func addNetwork(d *VCenterDriver, devices object.VirtualDeviceList, config *CreateConfig) (object.VirtualDeviceList, error) {
 	if len(config.NICs) == 0 {
 		return nil, errors.New("no network adapters have been defined")
 	}
@@ -872,7 +877,7 @@ func addNetwork(d *Driver, devices object.VirtualDeviceList, config *CreateConfi
 	return devices, nil
 }
 
-func findNetwork(network string, host string, d *Driver) (object.NetworkReference, error) {
+func findNetwork(network string, host string, d *VCenterDriver) (object.NetworkReference, error) {
 	if network != "" {
 		var err error
 		networks, err := d.FindNetworks(network)
@@ -941,7 +946,7 @@ func newVGPUProfile(vGPUProfile string) types.VirtualPCIPassthrough {
 	}
 }
 
-func (vm *VirtualMachine) AddCdrom(controllerType string, datastoreIsoPath string) error {
+func (vm *VirtualMachineDriver) AddCdrom(controllerType string, datastoreIsoPath string) error {
 	devices, err := vm.vm.Device(vm.driver.ctx)
 	if err != nil {
 		return err
@@ -985,7 +990,7 @@ func (vm *VirtualMachine) AddCdrom(controllerType string, datastoreIsoPath strin
 	return vm.addDevice(cdrom)
 }
 
-func (vm *VirtualMachine) AddFloppy(imgPath string) error {
+func (vm *VirtualMachineDriver) AddFloppy(imgPath string) error {
 	devices, err := vm.vm.Device(vm.driver.ctx)
 	if err != nil {
 		return err
@@ -1003,7 +1008,7 @@ func (vm *VirtualMachine) AddFloppy(imgPath string) error {
 	return vm.addDevice(floppy)
 }
 
-func (vm *VirtualMachine) SetBootOrder(order []string) error {
+func (vm *VirtualMachineDriver) SetBootOrder(order []string) error {
 	devices, err := vm.vm.Device(vm.driver.ctx)
 	if err != nil {
 		return err
@@ -1016,11 +1021,11 @@ func (vm *VirtualMachine) SetBootOrder(order []string) error {
 	return vm.vm.SetBootOptions(vm.driver.ctx, &bootOptions)
 }
 
-func (vm *VirtualMachine) RemoveDevice(keepFiles bool, device ...types.BaseVirtualDevice) error {
+func (vm *VirtualMachineDriver) RemoveDevice(keepFiles bool, device ...types.BaseVirtualDevice) error {
 	return vm.vm.RemoveDevice(vm.driver.ctx, keepFiles, device...)
 }
 
-func (vm *VirtualMachine) addDevice(device types.BaseVirtualDevice) error {
+func (vm *VirtualMachineDriver) addDevice(device types.BaseVirtualDevice) error {
 	newDevices := object.VirtualDeviceList{device}
 	confSpec := types.VirtualMachineConfigSpec{}
 	var err error
@@ -1038,7 +1043,7 @@ func (vm *VirtualMachine) addDevice(device types.BaseVirtualDevice) error {
 	return err
 }
 
-func (vm *VirtualMachine) AddConfigParams(params map[string]string, info *types.ToolsConfigInfo) error {
+func (vm *VirtualMachineDriver) AddConfigParams(params map[string]string, info *types.ToolsConfigInfo) error {
 	var confSpec types.VirtualMachineConfigSpec
 
 	var ov []types.BaseOptionValue
@@ -1066,19 +1071,19 @@ func (vm *VirtualMachine) AddConfigParams(params map[string]string, info *types.
 	return nil
 }
 
-func (vm *VirtualMachine) Export() (*nfc.Lease, error) {
+func (vm *VirtualMachineDriver) Export() (*nfc.Lease, error) {
 	return vm.vm.Export(vm.driver.ctx)
 }
 
-func (vm *VirtualMachine) CreateDescriptor(m *ovf.Manager, cdp types.OvfCreateDescriptorParams) (*types.OvfCreateDescriptorResult, error) {
+func (vm *VirtualMachineDriver) CreateDescriptor(m *ovf.Manager, cdp types.OvfCreateDescriptorParams) (*types.OvfCreateDescriptorResult, error) {
 	return m.CreateDescriptor(vm.driver.ctx, vm.vm, cdp)
 }
 
-func (vm *VirtualMachine) NewOvfManager() *ovf.Manager {
+func (vm *VirtualMachineDriver) NewOvfManager() *ovf.Manager {
 	return ovf.NewManager(vm.vm.Client())
 }
 
-func (vm *VirtualMachine) GetOvfExportOptions(m *ovf.Manager) ([]types.OvfOptionInfo, error) {
+func (vm *VirtualMachineDriver) GetOvfExportOptions(m *ovf.Manager) ([]types.OvfOptionInfo, error) {
 	var mgr mo.OvfManager
 	err := property.DefaultCollector(vm.vm.Client()).RetrieveOne(vm.driver.ctx, m.Reference(), nil, &mgr)
 	if err != nil {

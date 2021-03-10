@@ -12,8 +12,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/packer/tmp"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/tmp"
 )
 
 type LxcAttachCommunicator struct {
@@ -23,7 +23,7 @@ type LxcAttachCommunicator struct {
 	CmdWrapper    CommandWrapper
 }
 
-func (c *LxcAttachCommunicator) Start(ctx context.Context, cmd *packer.RemoteCmd) error {
+func (c *LxcAttachCommunicator) Start(ctx context.Context, cmd *packersdk.RemoteCmd) error {
 	localCmd, err := c.Execute(cmd.Command)
 
 	if err != nil {

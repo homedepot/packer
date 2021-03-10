@@ -10,14 +10,15 @@ import (
 	"time"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	"github.com/hashicorp/packer/builder/googlecompute"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 	"github.com/hashicorp/packer/post-processor/artifice"
-	"github.com/hashicorp/packer/template/interpolate"
-	"golang.org/x/oauth2/jwt"
 )
 
 type Config struct {
@@ -26,6 +27,8 @@ type Config struct {
 	//The JSON file containing your account credentials.
 	//If specified, the account file will take precedence over any `googlecompute` builder authentication method.
 	AccountFile string `mapstructure:"account_file"`
+	// This allows service account impersonation as per the [docs](https://cloud.google.com/iam/docs/impersonating-service-accounts).
+	ImpersonateServiceAccount string `mapstructure:"impersonate_service_account" required:"false"`
 	//The size of the export instances disk.
 	//The disk is unused for the export but a larger size will increase `pd-ssd` read speed.
 	//This defaults to `200`, which is 200GB.
@@ -57,7 +60,7 @@ type Config struct {
 	VaultGCPOauthEngine string `mapstructure:"vault_gcp_oauth_engine"`
 	ServiceAccountEmail string `mapstructure:"service_account_email"`
 
-	account *jwt.Config
+	account *googlecompute.ServiceAccount
 	ctx     interpolate.Context
 }
 
@@ -70,6 +73,7 @@ func (p *PostProcessor) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMap
 
 func (p *PostProcessor) Configure(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 	}, raws...)
@@ -77,10 +81,10 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		return err
 	}
 
-	errs := new(packer.MultiError)
+	errs := new(packersdk.MultiError)
 
 	if len(p.config.Paths) == 0 {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("paths must be specified"))
 	}
 
@@ -102,7 +106,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	}
 
 	if p.config.AccountFile != "" && p.config.VaultGCPOauthEngine != "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("May set either account_file or "+
 				"vault_gcp_oauth_engine, but not both."))
 	}
@@ -114,7 +118,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	return nil
 }
 
-func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, bool, error) {
+func (p *PostProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, artifact packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
 	switch artifact.BuilderId() {
 	case googlecompute.BuilderId, artifice.BuilderId:
 		break
@@ -179,14 +183,21 @@ func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact 
 			"https://www.googleapis.com/auth/compute",
 			"https://www.googleapis.com/auth/devstorage.full_control",
 			"https://www.googleapis.com/auth/userinfo.email",
+			"https://www.googleapis.com/auth/logging.write",
 		},
 	}
 	if p.config.ServiceAccountEmail != "" {
 		exporterConfig.ServiceAccountEmail = p.config.ServiceAccountEmail
 	}
+	cfg := googlecompute.GCEDriverConfig{
+		Ui:                            ui,
+		ProjectId:                     builderProjectId,
+		Account:                       p.config.account,
+		ImpersonateServiceAccountName: p.config.ImpersonateServiceAccount,
+		VaultOauthEngineName:          p.config.VaultGCPOauthEngine,
+	}
 
-	driver, err := googlecompute.NewDriverGCE(ui, builderProjectId,
-		p.config.account, p.config.VaultGCPOauthEngine)
+	driver, err := googlecompute.NewDriverGCE(cfg)
 	if err != nil {
 		return nil, false, false, err
 	}
@@ -199,10 +210,14 @@ func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact 
 
 	// Build the steps.
 	steps := []multistep.Step{
-		&googlecompute.StepCreateSSHKey{
-			Debug:        p.config.PackerDebug,
-			DebugKeyPath: fmt.Sprintf("gce_%s.pem", p.config.PackerBuildName),
+		&communicator.StepSSHKeyGen{
+			CommConf: &exporterConfig.Comm,
 		},
+		multistep.If(p.config.PackerDebug,
+			&communicator.StepDumpSSHKey{
+				Path: fmt.Sprintf("gce_%s.pem", p.config.PackerBuildName),
+			},
+		),
 		&googlecompute.StepCreateInstance{
 			Debug: p.config.PackerDebug,
 		},
@@ -211,7 +226,7 @@ func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact 
 	}
 
 	// Run the steps.
-	p.runner = common.NewRunner(steps, p.config.PackerConfig, ui)
+	p.runner = commonsteps.NewRunner(steps, p.config.PackerConfig, ui)
 	p.runner.Run(ctx, state)
 
 	result := &Artifact{paths: p.config.Paths}

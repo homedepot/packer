@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	vboxcommon "github.com/hashicorp/packer/builder/virtualbox/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 
 	"path/filepath"
 	"strconv"
@@ -20,7 +20,7 @@ type stepCreateDisk struct{}
 func (s *stepCreateDisk) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(vboxcommon.Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmName := state.Get("vmName").(string)
 
 	format := "VDI"
@@ -66,6 +66,18 @@ func (s *stepCreateDisk) Run(ctx context.Context, state multistep.StateBag) mult
 		}
 	}
 
+	// Add a VirtIO controller if we were asked to use VirtIO. We still attach
+	// the VirtIO controller above because some other things (disks) require
+	// that.
+	if config.HardDriveInterface == "virtio" || config.ISOInterface == "virtio" {
+		if err := driver.CreateVirtIOController(vmName, "VirtIO Controller"); err != nil {
+			err := fmt.Errorf("Error creating disk controller: %s", err)
+			state.Put("error", err)
+			ui.Error(err.Error())
+			return multistep.ActionHalt
+		}
+	}
+
 	if config.HardDriveInterface == "scsi" {
 		if err := driver.CreateSCSIController(vmName, "SCSI Controller"); err != nil {
 			err := fmt.Errorf("Error creating disk controller: %s", err)
@@ -86,13 +98,11 @@ func (s *stepCreateDisk) Run(ctx context.Context, state multistep.StateBag) mult
 	controllerName := "IDE Controller"
 	if config.HardDriveInterface == "sata" {
 		controllerName = "SATA Controller"
-	}
-
-	if config.HardDriveInterface == "scsi" {
+	} else if config.HardDriveInterface == "scsi" {
 		controllerName = "SCSI Controller"
-	}
-
-	if config.HardDriveInterface == "pcie" {
+	} else if config.HardDriveInterface == "virtio" {
+		controllerName = "VirtIO Controller"
+	} else if config.HardDriveInterface == "pcie" {
 		controllerName = "NVMe Controller"
 	}
 

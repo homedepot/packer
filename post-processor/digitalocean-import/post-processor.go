@@ -20,11 +20,11 @@ import (
 	"github.com/digitalocean/godo"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	"github.com/hashicorp/packer/builder/digitalocean"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
 )
 
 const BuilderId = "packer.post-processor.digitalocean-import"
@@ -77,6 +77,7 @@ func (p *PostProcessor) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMap
 
 func (p *PostProcessor) Configure(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -111,10 +112,10 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		p.config.Timeout = 20 * time.Minute
 	}
 
-	errs := new(packer.MultiError)
+	errs := new(packersdk.MultiError)
 
 	if err = interpolate.Validate(p.config.ObjectName, &p.config.ctx); err != nil {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("Error parsing space_object_name template: %s", err))
 	}
 
@@ -128,13 +129,13 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	}
 	for key, ptr := range requiredArgs {
 		if *ptr == "" {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("%s must be set", key))
 		}
 	}
 
 	if len(p.config.ImageRegions) == 0 {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("image_regions must be set"))
 	}
 
@@ -142,12 +143,12 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		return errs
 	}
 
-	packer.LogSecretFilter.Set(p.config.SpacesKey, p.config.SpacesSecret, p.config.APIToken)
+	packersdk.LogSecretFilter.Set(p.config.SpacesKey, p.config.SpacesSecret, p.config.APIToken)
 	log.Println(p.config)
 	return nil
 }
 
-func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, bool, error) {
+func (p *PostProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, artifact packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
 	var err error
 
 	generatedData := artifact.State("generated_data")
@@ -163,27 +164,9 @@ func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact 
 	}
 	log.Printf("Rendered space_object_name as %s", p.config.ObjectName)
 
-	source := ""
-	artifacts := artifact.Files()
 	log.Println("Looking for image in artifact")
-	if len(artifacts) > 1 {
-		validSuffix := []string{"raw", "img", "qcow2", "vhdx", "vdi", "vmdk", "tar.bz2", "tar.xz", "tar.gz"}
-		for _, path := range artifact.Files() {
-			for _, suffix := range validSuffix {
-				if strings.HasSuffix(path, suffix) {
-					source = path
-					break
-				}
-			}
-			if source != "" {
-				break
-			}
-		}
-	} else {
-		source = artifact.Files()[0]
-	}
-
-	if source == "" {
+	source, err := extractImageArtifact(artifact.Files())
+	if err != nil {
 		return nil, false, false, fmt.Errorf("Image file not found")
 	}
 
@@ -258,6 +241,29 @@ func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact 
 	}
 
 	return artifact, false, false, nil
+}
+
+func extractImageArtifact(artifacts []string) (string, error) {
+	artifactCount := len(artifacts)
+
+	if artifactCount == 0 {
+		return "", fmt.Errorf("no artifacts were provided")
+	}
+
+	if artifactCount == 1 {
+		return artifacts[0], nil
+	}
+
+	validSuffix := []string{"raw", "img", "qcow2", "vhdx", "vdi", "vmdk", "tar.bz2", "tar.xz", "tar.gz"}
+	for _, path := range artifacts {
+		for _, suffix := range validSuffix {
+			if strings.HasSuffix(path, suffix) {
+				return path, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no valid image file found")
 }
 
 func uploadImageToSpaces(source string, p *PostProcessor, s *session.Session) (err error) {

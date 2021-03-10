@@ -8,9 +8,9 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/iam"
-	"github.com/hashicorp/packer/common/uuid"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/uuid"
 )
 
 type StepIamInstanceProfile struct {
@@ -25,7 +25,7 @@ type StepIamInstanceProfile struct {
 
 func (s *StepIamInstanceProfile) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	iamsvc := state.Get("iam").(*iam.IAM)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	state.Put("iamInstanceProfile", "")
 
@@ -147,7 +147,7 @@ func (s *StepIamInstanceProfile) Run(ctx context.Context, state multistep.StateB
 
 func (s *StepIamInstanceProfile) Cleanup(state multistep.StateBag) {
 	iamsvc := state.Get("iam").(*iam.IAM)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	var err error
 
 	if s.roleIsAttached == true {

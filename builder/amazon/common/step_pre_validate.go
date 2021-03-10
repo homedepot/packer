@@ -9,9 +9,10 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
-	"github.com/hashicorp/packer/common/retry"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
+	"github.com/hashicorp/packer/builder/amazon/common/awserrors"
 )
 
 // StepPreValidate provides an opportunity to pre-validate any configuration for
@@ -27,7 +28,7 @@ type StepPreValidate struct {
 }
 
 func (s *StepPreValidate) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	if accessConfig, ok := state.GetOk("access_config"); ok {
 		accessconf := accessConfig.(*AccessConfig)
@@ -39,7 +40,7 @@ func (s *StepPreValidate) Run(ctx context.Context, state multistep.StateBag) mul
 			err := retry.Config{
 				Tries: 11,
 				ShouldRetry: func(err error) bool {
-					if IsAWSErr(err, "AuthFailure", "") {
+					if awserrors.Matches(err, "AuthFailure", "") {
 						log.Printf("Waiting for Vault-generated AWS credentials" +
 							" to pass authentication... trying again.")
 						return true
@@ -131,7 +132,7 @@ func (s *StepPreValidate) checkVpc(conn ec2iface.EC2API) error {
 	}
 
 	res, err := conn.DescribeVpcs(&ec2.DescribeVpcsInput{VpcIds: []*string{aws.String(s.VpcId)}})
-	if IsAWSErr(err, "InvalidVpcID.NotFound", "") || err != nil {
+	if awserrors.Matches(err, "InvalidVpcID.NotFound", "") || err != nil {
 		return fmt.Errorf("Error retrieving VPC information for vpc_id %s: %s", s.VpcId, err)
 	}
 

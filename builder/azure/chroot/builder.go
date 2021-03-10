@@ -16,14 +16,15 @@ import (
 	"strings"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/chroot"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	azcommon "github.com/hashicorp/packer/builder/azure/common"
 	"github.com/hashicorp/packer/builder/azure/common/client"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/common/chroot"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
 
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-12-01/compute"
 	"github.com/Azure/go-autorest/autorest/azure"
@@ -144,7 +145,7 @@ type Builder struct {
 }
 
 // verify interface implementation
-var _ packer.Builder = &Builder{}
+var _ packersdk.Builder = &Builder{}
 
 func (b *Builder) ConfigSpec() hcldec.ObjectSpec { return b.config.FlatMapstructure().HCL2Spec() }
 
@@ -153,6 +154,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	b.config.ctx.Funcs["vm"] = CreateVMMetadataTemplateFunc()
 	md := &mapstructure.Metadata{}
 	err := config.Decode(&b.config, &config.DecodeOpts{
+		PluginType:         BuilderID,
 		Interpolate:        true,
 		InterpolateContext: &b.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -171,7 +173,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 		return nil, nil, err
 	}
 
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 	var warns []string
 
 	// Defaults
@@ -219,7 +221,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 			&b.config.ctx); err == nil {
 			b.config.TemporaryOSDiskID = def
 		} else {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("unable to render temporary disk id: %s", err))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("unable to render temporary disk id: %s", err))
 		}
 	}
 
@@ -229,7 +231,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 			&b.config.ctx); err == nil {
 			b.config.TemporaryOSDiskSnapshotID = def
 		} else {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("unable to render temporary snapshot id: %s", err))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("unable to render temporary snapshot id: %s", err))
 		}
 	}
 
@@ -239,7 +241,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 			&b.config.ctx); err == nil {
 			b.config.TemporaryDataDiskIDPrefix = def
 		} else {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("unable to render temporary data disk id prefix: %s", err))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("unable to render temporary data disk id prefix: %s", err))
 		}
 	}
 
@@ -249,7 +251,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 			&b.config.ctx); err == nil {
 			b.config.TemporaryDataDiskSnapshotIDPrefix = def
 		} else {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("unable to render temporary data disk snapshot id prefix: %s", err))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("unable to render temporary data disk snapshot id prefix: %s", err))
 		}
 	}
 
@@ -277,15 +279,15 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 
 	if b.config.FromScratch {
 		if b.config.Source != "" {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("source cannot be specified when building from_scratch"))
 		}
 		if b.config.OSDiskSizeGB == 0 {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("os_disk_size_gb is required with from_scratch"))
 		}
 		if len(b.config.PreMountCommands) == 0 {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("pre_mount_commands is required with from_scratch"))
 		}
 	} else {
@@ -303,25 +305,25 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 			log.Println("Source is a shared image ID:", b.config.Source)
 			b.config.sourceType = sourceSharedImage
 		} else {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("source: %q is not a valid platform image specifier, nor is it a disk resource ID", b.config.Source))
 		}
 	}
 
 	if err := checkDiskCacheType(b.config.OSDiskCacheType); err != nil {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("os_disk_cache_type: %v", err))
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("os_disk_cache_type: %v", err))
 	}
 
 	if err := checkStorageAccountType(b.config.OSDiskStorageAccountType); err != nil {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("os_disk_storage_account_type: %v", err))
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("os_disk_storage_account_type: %v", err))
 	}
 
 	if err := checkDiskCacheType(b.config.DataDiskCacheType); err != nil {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("data_disk_cache_type: %v", err))
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("data_disk_cache_type: %v", err))
 	}
 
 	if err := checkStorageAccountType(b.config.DataDiskStorageAccountType); err != nil {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("data_disk_storage_account_type: %v", err))
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("data_disk_storage_account_type: %v", err))
 	}
 
 	if b.config.ImageResourceID != "" {
@@ -329,7 +331,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 		if err != nil ||
 			!strings.EqualFold(r.Provider, "Microsoft.Compute") ||
 			!strings.EqualFold(r.ResourceType, "images") {
-			errs = packer.MultiErrorAppend(fmt.Errorf(
+			errs = packersdk.MultiErrorAppend(fmt.Errorf(
 				"image_resource_id: %q is not a valid image resource id", b.config.ImageResourceID))
 		}
 	}
@@ -337,7 +339,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	if azcommon.StringsContains(md.Keys, "shared_image_destination") {
 		e, w := b.config.SharedImageGalleryDestination.Validate("shared_image_destination")
 		if len(e) > 0 {
-			errs = packer.MultiErrorAppend(errs, e...)
+			errs = packersdk.MultiErrorAppend(errs, e...)
 		}
 		if len(w) > 0 {
 			warns = append(warns, w...)
@@ -345,18 +347,18 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
 	}
 
 	if !azcommon.StringsContains(md.Keys, "shared_image_destination") && b.config.ImageResourceID == "" {
-		errs = packer.MultiErrorAppend(errs, errors.New("image_resource_id or shared_image_destination is required"))
+		errs = packersdk.MultiErrorAppend(errs, errors.New("image_resource_id or shared_image_destination is required"))
 	}
 
 	if err := checkHyperVGeneration(b.config.ImageHyperVGeneration); err != nil {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("image_hyperv_generation: %v", err))
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("image_hyperv_generation: %v", err))
 	}
 
 	if errs != nil {
 		return nil, warns, errs
 	}
 
-	packer.LogSecretFilter.Set(b.config.ClientConfig.ClientSecret, b.config.ClientConfig.ClientJWT)
+	packersdk.LogSecretFilter.Set(b.config.ClientConfig.ClientSecret, b.config.ClientConfig.ClientJWT)
 	return nil, warns, nil
 }
 
@@ -390,7 +392,7 @@ func checkHyperVGeneration(s string) interface{} {
 		s, compute.PossibleHyperVGenerationValues())
 }
 
-func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (packer.Artifact, error) {
+func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook) (packersdk.Artifact, error) {
 	switch runtime.GOOS {
 	case "linux", "freebsd":
 		break
@@ -438,7 +440,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 	steps := buildsteps(b.config, info)
 
 	// Run!
-	b.runner = common.NewRunner(steps, b.config.PackerConfig, ui)
+	b.runner = commonsteps.NewRunner(steps, b.config.PackerConfig, ui)
 	b.runner.Run(ctx, state)
 
 	// If there was an error, return that

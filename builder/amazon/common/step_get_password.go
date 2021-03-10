@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/hashicorp/packer/common/retry"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
 )
 
 // StepGetPassword reads the password from a Windows server and sets it
@@ -28,7 +28,7 @@ type StepGetPassword struct {
 }
 
 func (s *StepGetPassword) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	// Skip if we're not using winrm
 	if s.Comm.Type != "winrm" {
@@ -91,7 +91,7 @@ WaitLoop:
 	}
 	// store so that we can access this later during provisioning
 	state.Put("winrm_password", s.Comm.WinRMPassword)
-	packer.LogSecretFilter.Set(s.Comm.WinRMPassword)
+	packersdk.LogSecretFilter.Set(s.Comm.WinRMPassword)
 
 	return multistep.ActionContinue
 }

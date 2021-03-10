@@ -3,9 +3,9 @@ package common
 import (
 	"context"
 
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/vsphere/driver"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 type StepConvertToTemplate struct {
@@ -13,8 +13,8 @@ type StepConvertToTemplate struct {
 }
 
 func (s *StepConvertToTemplate) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
-	ui := state.Get("ui").(packer.Ui)
-	vm := state.Get("vm").(*driver.VirtualMachine)
+	ui := state.Get("ui").(packersdk.Ui)
+	vm := state.Get("vm").(*driver.VirtualMachineDriver)
 
 	if s.ConvertToTemplate {
 		ui.Say("Convert VM into template...")

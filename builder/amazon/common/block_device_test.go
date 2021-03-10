@@ -6,7 +6,8 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/google/go-cmp/cmp"
-	"github.com/hashicorp/packer/helper/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 func TestBlockDevice(t *testing.T) {
@@ -53,13 +54,32 @@ func TestBlockDevice(t *testing.T) {
 				VolumeType:          "io1",
 				VolumeSize:          8,
 				DeleteOnTermination: true,
-				IOPS:                1000,
+				IOPS:                aws.Int64(1000),
 			},
 
 			Result: &ec2.BlockDeviceMapping{
 				DeviceName: aws.String("/dev/sdb"),
 				Ebs: &ec2.EbsBlockDevice{
 					VolumeType:          aws.String("io1"),
+					VolumeSize:          aws.Int64(8),
+					DeleteOnTermination: aws.Bool(true),
+					Iops:                aws.Int64(1000),
+				},
+			},
+		},
+		{
+			Config: &BlockDevice{
+				DeviceName:          "/dev/sdb",
+				VolumeType:          "io2",
+				VolumeSize:          8,
+				DeleteOnTermination: true,
+				IOPS:                aws.Int64(1000),
+			},
+
+			Result: &ec2.BlockDeviceMapping{
+				DeviceName: aws.String("/dev/sdb"),
+				Ebs: &ec2.EbsBlockDevice{
+					VolumeType:          aws.String("io2"),
 					VolumeSize:          aws.Int64(8),
 					DeleteOnTermination: aws.Bool(true),
 					Iops:                aws.Int64(1000),
@@ -143,6 +163,29 @@ func TestBlockDevice(t *testing.T) {
 				NoDevice:   aws.String(""),
 			},
 		},
+		{
+			Config: &BlockDevice{
+				DeviceName:          "/dev/sdb",
+				VolumeType:          "gp3",
+				VolumeSize:          8,
+				Throughput:          aws.Int64(125),
+				IOPS:                aws.Int64(3000),
+				DeleteOnTermination: true,
+				Encrypted:           config.TriTrue,
+			},
+
+			Result: &ec2.BlockDeviceMapping{
+				DeviceName: aws.String("/dev/sdb"),
+				Ebs: &ec2.EbsBlockDevice{
+					VolumeType:          aws.String("gp3"),
+					VolumeSize:          aws.Int64(8),
+					Throughput:          aws.Int64(125),
+					Iops:                aws.Int64(3000),
+					DeleteOnTermination: aws.Bool(true),
+					Encrypted:           aws.Bool(true),
+				},
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -160,6 +203,199 @@ func TestBlockDevice(t *testing.T) {
 		launchResults := launchBlockDevices.BuildEC2BlockDeviceMappings()
 		if diff := cmp.Diff(expected, launchResults); diff != "" {
 			t.Fatalf("Bad block device: %s", diff)
+		}
+	}
+}
+
+func TestIOPSValidation(t *testing.T) {
+
+	cases := []struct {
+		device BlockDevice
+		ok     bool
+		msg    string
+	}{
+		// volume size unknown
+		{
+			device: BlockDevice{
+				DeviceName: "/dev/sdb",
+				VolumeType: "io1",
+				IOPS:       aws.Int64(1000),
+			},
+			ok: true,
+		},
+		{
+			device: BlockDevice{
+				DeviceName: "/dev/sdb",
+				VolumeType: "io2",
+				IOPS:       aws.Int64(1000),
+			},
+			ok: true,
+		},
+		// ratio requirement satisfied
+		{
+			device: BlockDevice{
+				DeviceName: "/dev/sdb",
+				VolumeType: "io1",
+				VolumeSize: 50,
+				IOPS:       aws.Int64(1000),
+			},
+			ok: true,
+		},
+		{
+			device: BlockDevice{
+				DeviceName: "/dev/sdb",
+				VolumeType: "io2",
+				VolumeSize: 100,
+				IOPS:       aws.Int64(1000),
+			},
+			ok: true,
+		},
+		// ratio requirement not satisfied
+		{
+			device: BlockDevice{
+				DeviceName: "/dev/sdb",
+				VolumeType: "io1",
+				VolumeSize: 10,
+				IOPS:       aws.Int64(2000),
+			},
+			ok:  false,
+			msg: "/dev/sdb: the maximum ratio of provisioned IOPS to requested volume size (in GiB) is 50:1 for io1 volumes",
+		},
+		{
+			device: BlockDevice{
+				DeviceName: "/dev/sdb",
+				VolumeType: "io2",
+				VolumeSize: 50,
+				IOPS:       aws.Int64(30000),
+			},
+			ok:  false,
+			msg: "/dev/sdb: the maximum ratio of provisioned IOPS to requested volume size (in GiB) is 500:1 for io2 volumes",
+		},
+		// exceed max iops
+		{
+			device: BlockDevice{
+				DeviceName: "/dev/sdb",
+				VolumeType: "io2",
+				VolumeSize: 500,
+				IOPS:       aws.Int64(99999),
+			},
+			ok:  false,
+			msg: "IOPS must be between 100 and 64000 for device /dev/sdb",
+		},
+		// lower than min iops
+		{
+			device: BlockDevice{
+				DeviceName: "/dev/sdb",
+				VolumeType: "io2",
+				VolumeSize: 50,
+				IOPS:       aws.Int64(10),
+			},
+			ok:  false,
+			msg: "IOPS must be between 100 and 64000 for device /dev/sdb",
+		},
+		// exceed max iops
+		{
+			device: BlockDevice{
+				DeviceName: "/dev/sdb",
+				VolumeType: "gp3",
+				VolumeSize: 50,
+				Throughput: aws.Int64(125),
+				IOPS:       aws.Int64(99999),
+			},
+			ok:  false,
+			msg: "IOPS must be between 3000 and 16000 for device /dev/sdb",
+		},
+		// lower than min iops
+		{
+			device: BlockDevice{
+				DeviceName: "/dev/sdb",
+				VolumeType: "gp3",
+				VolumeSize: 50,
+				Throughput: aws.Int64(125),
+				IOPS:       aws.Int64(10),
+			},
+			ok:  false,
+			msg: "IOPS must be between 3000 and 16000 for device /dev/sdb",
+		},
+	}
+
+	ctx := interpolate.Context{}
+	for _, testCase := range cases {
+		err := testCase.device.Prepare(&ctx)
+		if testCase.ok && err != nil {
+			t.Fatalf("should not error, but: %v", err)
+		}
+		if !testCase.ok {
+			if err == nil {
+				t.Fatalf("should error")
+			} else if err.Error() != testCase.msg {
+				t.Fatalf("wrong error: expected %s, found: %v", testCase.msg, err)
+			}
+		}
+	}
+}
+
+func TestThroughputValidation(t *testing.T) {
+
+	cases := []struct {
+		device BlockDevice
+		ok     bool
+		msg    string
+	}{
+		{
+			device: BlockDevice{
+				DeviceName: "/dev/sdb",
+				VolumeType: "gp3",
+				Throughput: aws.Int64(125),
+				IOPS:       aws.Int64(3000),
+			},
+			ok: true,
+		},
+		{
+			device: BlockDevice{
+				DeviceName: "/dev/sdb",
+				VolumeType: "gp3",
+				Throughput: aws.Int64(1000),
+				IOPS:       aws.Int64(3000),
+			},
+			ok: true,
+		},
+		// exceed max Throughput
+		{
+			device: BlockDevice{
+				DeviceName: "/dev/sdb",
+				VolumeType: "gp3",
+				Throughput: aws.Int64(1001),
+				IOPS:       aws.Int64(3000),
+			},
+			ok:  false,
+			msg: "Throughput must be between 125 and 1000 for device /dev/sdb",
+		},
+		// lower than min Throughput
+		{
+			device: BlockDevice{
+				DeviceName: "/dev/sdb",
+				VolumeType: "gp3",
+				Throughput: aws.Int64(124),
+				IOPS:       aws.Int64(3000),
+			},
+			ok:  false,
+			msg: "Throughput must be between 125 and 1000 for device /dev/sdb",
+		},
+	}
+
+	ctx := interpolate.Context{}
+	for _, testCase := range cases {
+		err := testCase.device.Prepare(&ctx)
+		if testCase.ok && err != nil {
+			t.Fatalf("should not error, but: %v", err)
+		}
+		if !testCase.ok {
+			if err == nil {
+				t.Fatalf("should error")
+			} else if err.Error() != testCase.msg {
+				t.Fatalf("wrong error: expected %s, found: %v", testCase.msg, err)
+			}
 		}
 	}
 }

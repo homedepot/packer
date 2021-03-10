@@ -1,4 +1,4 @@
-//go:generate mapstructure-to-hcl2 -type Config
+//go:generate mapstructure-to-hcl2 -type Config,CreateVNICDetails,ListImagesRequest
 
 package oci
 
@@ -13,14 +13,38 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/pathing"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	ocicommon "github.com/oracle/oci-go-sdk/common"
 	ociauth "github.com/oracle/oci-go-sdk/common/auth"
 )
+
+type CreateVNICDetails struct {
+	// fields that can be specified under "create_vnic_details"
+	AssignPublicIp      *bool                             `mapstructure:"assign_public_ip" required:"false"`
+	DefinedTags         map[string]map[string]interface{} `mapstructure:"defined_tags" required:"false"`
+	DisplayName         *string                           `mapstructure:"display_name" required:"false"`
+	FreeformTags        map[string]string                 `mapstructure:"tags" required:"false"`
+	HostnameLabel       *string                           `mapstructure:"hostname_label" required:"false"`
+	NsgIds              []string                          `mapstructure:"nsg_ids" required:"false"`
+	PrivateIp           *string                           `mapstructure:"private_ip" required:"false"`
+	SkipSourceDestCheck *bool                             `mapstructure:"skip_source_dest_check" required:"false"`
+	SubnetId            *string                           `mapstructure:"subnet_id" required:"false"`
+}
+
+type ListImagesRequest struct {
+	// fields that can be specified under "base_image_filter"
+	CompartmentId          *string `mapstructure:"compartment_id"`
+	DisplayName            *string `mapstructure:"display_name"`
+	DisplayNameSearch      *string `mapstructure:"display_name_search"`
+	OperatingSystem        *string `mapstructure:"operating_system"`
+	OperatingSystemVersion *string `mapstructure:"operating_system_version"`
+	Shape                  *string `mapstructure:"shape"`
+}
 
 type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
@@ -56,12 +80,18 @@ type Config struct {
 	CompartmentID      string `mapstructure:"compartment_ocid"`
 
 	// Image
-	BaseImageID string `mapstructure:"base_image_ocid"`
-	Shape       string `mapstructure:"shape"`
-	ImageName   string `mapstructure:"image_name"`
+	BaseImageID        string            `mapstructure:"base_image_ocid"`
+	BaseImageFilter    ListImagesRequest `mapstructure:"base_image_filter"`
+	ImageName          string            `mapstructure:"image_name"`
+	ImageCompartmentID string            `mapstructure:"image_compartment_ocid"`
+	LaunchMode         string            `mapstructure:"image_launch_mode"`
 
 	// Instance
-	InstanceName string `mapstructure:"instance_name"`
+	InstanceName        *string                           `mapstructure:"instance_name"`
+	InstanceTags        map[string]string                 `mapstructure:"instance_tags"`
+	InstanceDefinedTags map[string]map[string]interface{} `mapstructure:"instance_defined_tags"`
+	Shape               string                            `mapstructure:"shape"`
+	BootVolumeSizeInGBs int64                             `mapstructure:"disk_size"`
 
 	// Metadata optionally contains custom metadata key/value pairs provided in the
 	// configuration. While this can be used to set metadata["user_data"] the explicit
@@ -75,7 +105,8 @@ type Config struct {
 	UserDataFile string `mapstructure:"user_data_file"`
 
 	// Networking
-	SubnetID string `mapstructure:"subnet_ocid"`
+	SubnetID          string            `mapstructure:"subnet_ocid"`
+	CreateVnicDetails CreateVNICDetails `mapstructure:"create_vnic_details"`
 
 	// Tagging
 	Tags        map[string]string                 `mapstructure:"tags"`
@@ -99,9 +130,9 @@ func (c *Config) Prepare(raws ...interface{}) error {
 		return fmt.Errorf("Failed to mapstructure Config: %+v", err)
 	}
 
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 	if es := c.Comm.Prepare(&c.ctx); len(es) > 0 {
-		errs = packer.MultiErrorAppend(errs, es...)
+		errs = packersdk.MultiErrorAppend(errs, es...)
 	}
 
 	var tenancyOCID string
@@ -113,28 +144,28 @@ func (c *Config) Prepare(raws ...interface{}) error {
 		// key involved.
 		var message string = " cannot be present when use_instance_principals is set to true."
 		if c.AccessCfgFile != "" {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("access_cfg_file"+message))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("access_cfg_file"+message))
 		}
 		if c.AccessCfgFileAccount != "" {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("access_cfg_file_account"+message))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("access_cfg_file_account"+message))
 		}
 		if c.UserID != "" {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("user_ocid"+message))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("user_ocid"+message))
 		}
 		if c.TenancyID != "" {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("tenancy_ocid"+message))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("tenancy_ocid"+message))
 		}
 		if c.Region != "" {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("region"+message))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("region"+message))
 		}
 		if c.Fingerprint != "" {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("fingerprint"+message))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("fingerprint"+message))
 		}
 		if c.KeyFile != "" {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("key_file"+message))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("key_file"+message))
 		}
 		if c.PassPhrase != "" {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("pass_phrase"+message))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("pass_phrase"+message))
 		}
 		// This check is used to facilitate testing. During testing a Mock struct
 		// is assigned to c.configProvider otherwise testing fails because Instance
@@ -167,7 +198,7 @@ func (c *Config) Prepare(raws ...interface{}) error {
 
 		var keyContent []byte
 		if c.KeyFile != "" {
-			path, err := packer.ExpandUser(c.KeyFile)
+			path, err := pathing.ExpandUser(c.KeyFile)
 			if err != nil {
 				return err
 			}
@@ -205,23 +236,23 @@ func (c *Config) Prepare(raws ...interface{}) error {
 		}
 
 		if userOCID, _ := configProvider.UserOCID(); userOCID == "" {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("'user_ocid' must be specified"))
 		}
 
 		tenancyOCID, _ = configProvider.TenancyOCID()
 		if tenancyOCID == "" {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("'tenancy_ocid' must be specified"))
 		}
 
 		if fingerprint, _ := configProvider.KeyFingerprint(); fingerprint == "" {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("'fingerprint' must be specified"))
 		}
 
 		if _, err := configProvider.PrivateRSAKey(); err != nil {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, errors.New("'key_file' must be specified"))
 		}
 
@@ -229,7 +260,7 @@ func (c *Config) Prepare(raws ...interface{}) error {
 	}
 
 	if c.AvailabilityDomain == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("'availability_domain' must be specified"))
 	}
 
@@ -237,19 +268,38 @@ func (c *Config) Prepare(raws ...interface{}) error {
 		c.CompartmentID = tenancyOCID
 	}
 
+	if c.ImageCompartmentID == "" {
+		c.ImageCompartmentID = c.CompartmentID
+	}
+
 	if c.Shape == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("'shape' must be specified"))
 	}
 
-	if c.SubnetID == "" {
-		errs = packer.MultiErrorAppend(
+	if (c.SubnetID == "") && (c.CreateVnicDetails.SubnetId == nil) {
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("'subnet_ocid' must be specified"))
 	}
 
-	if c.BaseImageID == "" {
-		errs = packer.MultiErrorAppend(
-			errs, errors.New("'base_image_ocid' must be specified"))
+	if c.CreateVnicDetails.SubnetId == nil {
+		c.CreateVnicDetails.SubnetId = &c.SubnetID
+	} else if (*c.CreateVnicDetails.SubnetId != c.SubnetID) && (c.SubnetID != "") {
+		errs = packersdk.MultiErrorAppend(
+			errs, errors.New("'create_vnic_details[subnet]' must match 'subnet_ocid' if both are specified"))
+	}
+
+	if (c.BaseImageID == "") && (c.BaseImageFilter == ListImagesRequest{}) {
+		errs = packersdk.MultiErrorAppend(
+			errs, errors.New("'base_image_ocid' or 'base_image_filter' must be specified"))
+	}
+
+	if c.BaseImageFilter.CompartmentId == nil {
+		c.BaseImageFilter.CompartmentId = &c.CompartmentID
+	}
+
+	if c.BaseImageFilter.Shape == nil {
+		c.BaseImageFilter.Shape = &c.Shape
 	}
 
 	// Validate tag lengths. TODO (hlowndes) maximum number of tags allowed.
@@ -258,19 +308,19 @@ func (c *Config) Prepare(raws ...interface{}) error {
 			k = strings.TrimSpace(k)
 			v = strings.TrimSpace(v)
 			if len(k) > 100 {
-				errs = packer.MultiErrorAppend(
+				errs = packersdk.MultiErrorAppend(
 					errs, fmt.Errorf("Tag key length too long. Maximum 100 but found %d. Key: %s", len(k), k))
 			}
 			if len(k) == 0 {
-				errs = packer.MultiErrorAppend(
+				errs = packersdk.MultiErrorAppend(
 					errs, errors.New("Tag key empty in config"))
 			}
 			if len(v) > 100 {
-				errs = packer.MultiErrorAppend(
+				errs = packersdk.MultiErrorAppend(
 					errs, fmt.Errorf("Tag value length too long. Maximum 100 but found %d. Key: %s", len(v), k))
 			}
 			if len(v) == 0 {
-				errs = packer.MultiErrorAppend(
+				errs = packersdk.MultiErrorAppend(
 					errs, errors.New("Tag value empty in config"))
 			}
 		}
@@ -279,7 +329,7 @@ func (c *Config) Prepare(raws ...interface{}) error {
 	if c.ImageName == "" {
 		name, err := interpolate.Render("packer-{{timestamp}}", nil)
 		if err != nil {
-			errs = packer.MultiErrorAppend(errs,
+			errs = packersdk.MultiErrorAppend(errs,
 				fmt.Errorf("unable to parse image name: %s", err))
 		} else {
 			c.ImageName = name
@@ -288,17 +338,17 @@ func (c *Config) Prepare(raws ...interface{}) error {
 
 	// Optional UserData config
 	if c.UserData != "" && c.UserDataFile != "" {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("Only one of user_data or user_data_file can be specified."))
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("Only one of user_data or user_data_file can be specified."))
 	} else if c.UserDataFile != "" {
 		if _, err := os.Stat(c.UserDataFile); err != nil {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("user_data_file not found: %s", c.UserDataFile))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("user_data_file not found: %s", c.UserDataFile))
 		}
 	}
 	// read UserDataFile into string.
 	if c.UserDataFile != "" {
 		fiData, err := ioutil.ReadFile(c.UserDataFile)
 		if err != nil {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("Problem reading user_data_file: %s", err))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("Problem reading user_data_file: %s", err))
 		}
 		c.UserData = string(fiData)
 	}
@@ -308,6 +358,15 @@ func (c *Config) Prepare(raws ...interface{}) error {
 			log.Printf("[DEBUG] base64 encoding user data...")
 			c.UserData = base64.StdEncoding.EncodeToString([]byte(c.UserData))
 		}
+	}
+
+	// Set default boot volume size to 50 if not set
+	// Check if size set is allowed by OCI
+	if c.BootVolumeSizeInGBs == 0 {
+		c.BootVolumeSizeInGBs = 50
+	} else if c.BootVolumeSizeInGBs < 50 || c.BootVolumeSizeInGBs > 16384 {
+		errs = packersdk.MultiErrorAppend(
+			errs, errors.New("'disk_size' must be between 50 and 16384 GBs"))
 	}
 
 	if errs != nil && len(errs.Errors) > 0 {

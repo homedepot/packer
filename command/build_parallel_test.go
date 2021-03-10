@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/file"
 	"github.com/hashicorp/packer/packer"
 	"github.com/hashicorp/packer/provisioner/sleep"
@@ -36,7 +37,7 @@ func (b *ParallelTestBuilder) Prepare(raws ...interface{}) ([]string, []string, 
 	return nil, nil, nil
 }
 
-func (b *ParallelTestBuilder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (packer.Artifact, error) {
+func (b *ParallelTestBuilder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook) (packersdk.Artifact, error) {
 	ui.Say("building")
 	b.wg.Done()
 	return nil, nil
@@ -51,7 +52,7 @@ func (b *LockedBuilder) Prepare(raws ...interface{}) ([]string, []string, error)
 	return nil, nil, nil
 }
 
-func (b *LockedBuilder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (packer.Artifact, error) {
+func (b *LockedBuilder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook) (packersdk.Artifact, error) {
 	ui.Say("locking build")
 	select {
 	case <-b.unlock:
@@ -67,17 +68,19 @@ func testMetaParallel(t *testing.T, builder *ParallelTestBuilder, locked *Locked
 	return Meta{
 		CoreConfig: &packer.CoreConfig{
 			Components: packer.ComponentFinder{
-				BuilderStore: packer.MapOfBuilder{
-					"parallel-test": func() (packer.Builder, error) { return builder, nil },
-					"file":          func() (packer.Builder, error) { return &file.Builder{}, nil },
-					"lock":          func() (packer.Builder, error) { return locked, nil },
-				},
-				ProvisionerStore: packer.MapOfProvisioner{
-					"sleep": func() (packer.Provisioner, error) { return &sleep.Provisioner{}, nil },
+				PluginConfig: &packer.PluginConfig{
+					Builders: packer.MapOfBuilder{
+						"parallel-test": func() (packersdk.Builder, error) { return builder, nil },
+						"file":          func() (packersdk.Builder, error) { return &file.Builder{}, nil },
+						"lock":          func() (packersdk.Builder, error) { return locked, nil },
+					},
+					Provisioners: packer.MapOfProvisioner{
+						"sleep": func() (packersdk.Provisioner, error) { return &sleep.Provisioner{}, nil },
+					},
 				},
 			},
 		},
-		Ui: &packer.BasicUi{
+		Ui: &packersdk.BasicUi{
 			Writer:      &out,
 			ErrorWriter: &err,
 		},

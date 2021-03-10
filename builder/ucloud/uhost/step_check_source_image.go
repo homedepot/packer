@@ -3,9 +3,10 @@ package uhost
 import (
 	"context"
 	"fmt"
+
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	ucloudcommon "github.com/hashicorp/packer/builder/ucloud/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 type stepCheckSourceImageId struct {
@@ -13,7 +14,7 @@ type stepCheckSourceImageId struct {
 }
 
 func (s *stepCheckSourceImageId) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	client := state.Get("client").(*ucloudcommon.UCloudClient)
 
 	ui.Say("Querying source image id...")

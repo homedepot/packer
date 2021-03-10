@@ -6,7 +6,6 @@ package arm
 // * ARM_CLIENT_ID
 // * ARM_CLIENT_SECRET
 // * ARM_SUBSCRIPTION_ID
-// * ARM_OBJECT_ID
 // * ARM_STORAGE_ACCOUNT
 //
 // The subscription in question should have a resource group
@@ -26,7 +25,7 @@ import (
 	"fmt"
 	"os"
 
-	builderT "github.com/hashicorp/packer/helper/builder/testing"
+	builderT "github.com/hashicorp/packer-plugin-sdk/acctest"
 )
 
 const DeviceLoginAcceptanceTest = "DEVICELOGIN_TEST"
@@ -44,6 +43,14 @@ func TestBuilderAcc_ManagedDisk_Windows_Build_Resource_Group(t *testing.T) {
 		PreCheck: func() { testAccPreCheck(t) },
 		Builder:  &Builder{},
 		Template: testBuilderAccManagedDiskWindowsBuildResourceGroup,
+	})
+}
+
+func TestBuilderAcc_ManagedDisk_Windows_Build_Resource_Group_Additional_Disk(t *testing.T) {
+	builderT.Test(t, builderT.TestCase{
+		PreCheck: func() { testAccPreCheck(t) },
+		Builder:  &Builder{},
+		Template: testBuilderAccManagedDiskWindowsBuildResourceGroupAdditionalDisk,
 	})
 }
 
@@ -80,6 +87,19 @@ func TestBuilderAcc_ManagedDisk_Linux_DeviceLogin(t *testing.T) {
 		PreCheck: func() { testAccPreCheck(t) },
 		Builder:  &Builder{},
 		Template: testBuilderAccManagedDiskLinuxDeviceLogin,
+	})
+}
+
+func TestBuilderAcc_ManagedDisk_Linux_AzureCLI(t *testing.T) {
+	if os.Getenv("AZURE_CLI_AUTH") == "" {
+		t.Skip("Azure CLI Acceptance tests skipped unless env 'AZURE_CLI_AUTH' is set, and an active `az login` session has been established")
+		return
+	}
+
+	builderT.Test(t, builderT.TestCase{
+		PreCheck: func() { testAccPreCheck(t) },
+		Builder:  &Builder{},
+		Template: testBuilderAccManagedDiskLinuxAzureCLI,
 	})
 }
 
@@ -151,7 +171,7 @@ const testBuilderAccManagedDiskWindowsBuildResourceGroup = `
 
 	  "build_resource_group_name" : "packer-acceptance-test",
 	  "managed_image_resource_group_name": "packer-acceptance-test",
-	  "managed_image_name": "testBuilderAccManagedDiskWindows-{{timestamp}}",
+	  "managed_image_name": "testBuilderAccManagedDiskWindowsBuildResourceGroup-{{timestamp}}",
 
 	  "os_type": "Windows",
 	  "image_publisher": "MicrosoftWindowsServer",
@@ -166,6 +186,42 @@ const testBuilderAccManagedDiskWindowsBuildResourceGroup = `
 	  "async_resourcegroup_delete": "true",
 
 	  "vm_size": "Standard_DS2_v2"
+	}]
+}
+`
+
+const testBuilderAccManagedDiskWindowsBuildResourceGroupAdditionalDisk = `
+{
+	"variables": {
+	  "client_id": "{{env ` + "`ARM_CLIENT_ID`" + `}}",
+	  "client_secret": "{{env ` + "`ARM_CLIENT_SECRET`" + `}}",
+	  "subscription_id": "{{env ` + "`ARM_SUBSCRIPTION_ID`" + `}}"
+	},
+	"builders": [{
+	  "type": "test",
+
+	  "client_id": "{{user ` + "`client_id`" + `}}",
+	  "client_secret": "{{user ` + "`client_secret`" + `}}",
+	  "subscription_id": "{{user ` + "`subscription_id`" + `}}",
+
+	  "build_resource_group_name" : "packer-acceptance-test",
+	  "managed_image_resource_group_name": "packer-acceptance-test",
+	  "managed_image_name": "testBuilderAccManagedDiskWindowsBuildResourceGroupAdditionDisk-{{timestamp}}",
+
+	  "os_type": "Windows",
+	  "image_publisher": "MicrosoftWindowsServer",
+	  "image_offer": "WindowsServer",
+	  "image_sku": "2012-R2-Datacenter",
+
+	  "communicator": "winrm",
+	  "winrm_use_ssl": "true",
+	  "winrm_insecure": "true",
+	  "winrm_timeout": "3m",
+	  "winrm_username": "packer",
+	  "async_resourcegroup_delete": "true",
+
+	  "vm_size": "Standard_DS2_v2",
+	  "disk_additional_size": [10,15]
 	}]
 }
 `
@@ -223,7 +279,11 @@ const testBuilderAccManagedDiskLinux = `
 	  "image_sku": "16.04-LTS",
 
 	  "location": "South Central US",
-	  "vm_size": "Standard_DS2_v2"
+	  "vm_size": "Standard_DS2_v2",
+	  "azure_tags": {
+	    "env": "testing",
+	    "builder": "packer"
+	   }
 	}]
 }
 `
@@ -258,7 +318,6 @@ const testBuilderAccBlobWindows = `
 	  "client_id": "{{env ` + "`ARM_CLIENT_ID`" + `}}",
 	  "client_secret": "{{env ` + "`ARM_CLIENT_SECRET`" + `}}",
 	  "subscription_id": "{{env ` + "`ARM_SUBSCRIPTION_ID`" + `}}",
-	  "object_id": "{{env ` + "`ARM_OBJECT_ID`" + `}}",
 	  "storage_account": "{{env ` + "`ARM_STORAGE_ACCOUNT`" + `}}"
 	},
 	"builders": [{
@@ -267,7 +326,6 @@ const testBuilderAccBlobWindows = `
 	  "client_id": "{{user ` + "`client_id`" + `}}",
 	  "client_secret": "{{user ` + "`client_secret`" + `}}",
 	  "subscription_id": "{{user ` + "`subscription_id`" + `}}",
-	  "object_id": "{{user ` + "`object_id`" + `}}",
 
 	  "storage_account": "{{user ` + "`storage_account`" + `}}",
 	  "resource_group_name": "packer-acceptance-test",
@@ -318,6 +376,30 @@ const testBuilderAccBlobLinux = `
 
 	  "location": "South Central US",
 	  "vm_size": "Standard_DS2_v2"
+	}]
+}
+`
+const testBuilderAccManagedDiskLinuxAzureCLI = `
+{
+	"builders": [{
+	  "type": "test",
+
+	  "use_azure_cli_auth": true,
+
+	  "managed_image_resource_group_name": "packer-acceptance-test",
+	  "managed_image_name": "testBuilderAccManagedDiskLinuxAzureCLI-{{timestamp}}",
+
+	  "os_type": "Linux",
+	  "image_publisher": "Canonical",
+	  "image_offer": "UbuntuServer",
+	  "image_sku": "16.04-LTS",
+
+	  "location": "South Central US",
+	  "vm_size": "Standard_DS2_v2",
+	  "azure_tags": {
+	    "env": "testing",
+	    "builder": "packer"
+	   }
 	}]
 }
 `

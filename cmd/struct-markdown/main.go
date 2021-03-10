@@ -27,8 +27,16 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	paths := strings.SplitAfter(absFilePath, "packer"+string(os.PathSeparator))
-	packerDir := paths[0]
+
+	projectRoot := os.Getenv("PROJECT_ROOT")
+	var paths []string
+	if projectRoot == "" {
+		// fall back to the packer root.
+		paths = strings.SplitAfter(absFilePath, "packer"+string(os.PathSeparator))
+		projectRoot = paths[0]
+	} else {
+		paths = strings.SplitAfter(absFilePath, projectRoot+string(os.PathSeparator))
+	}
 	builderName, _ := filepath.Split(paths[1])
 	builderName = strings.Trim(builderName, string(os.PathSeparator))
 
@@ -66,6 +74,11 @@ func main() {
 			Name:       typeSpec.Name.Name,
 			Filename:   typeSpec.Name.Name + ".mdx",
 			Header:     strings.TrimSpace(typeDecl.Doc.Text()),
+		}
+		dataSourceOutput := Struct{
+			SourcePath: sourcePath,
+			Name:       typeSpec.Name.Name,
+			Filename:   typeSpec.Name.Name + ".mdx",
 		}
 		required := Struct{
 			SourcePath: sourcePath,
@@ -126,9 +139,9 @@ func main() {
 				fieldType = `duration string | ex: "1h5m2s"`
 			case "config.Trilean":
 				fieldType = `boolean`
-			case "hcl2template.NameValues":
+			case "config.NameValues":
 				fieldType = `[]{name string, value string}`
-			case "hcl2template.KeyValues":
+			case "config.KeyValues":
 				fieldType = `[]{key string, value string}`
 			}
 
@@ -137,6 +150,12 @@ func main() {
 				Type: fieldType,
 				Docs: docs,
 			}
+
+			if typeSpec.Name.Name == "DatasourceOutput" {
+				dataSourceOutput.Fields = append(dataSourceOutput.Fields, field)
+				continue
+			}
+
 			if req, err := tags.Get("required"); err == nil && req.Value() == "true" {
 				required.Fields = append(required.Fields, field)
 			} else {
@@ -144,10 +163,10 @@ func main() {
 			}
 		}
 
-		dir := filepath.Join(packerDir, "website", "pages", "partials", builderName)
+		dir := filepath.Join(projectRoot, "website", "content", "partials", builderName)
 		os.MkdirAll(dir, 0755)
 
-		for _, str := range []Struct{header, required, notRequired} {
+		for _, str := range []Struct{header, dataSourceOutput, required, notRequired} {
 			if len(str.Fields) == 0 && len(str.Header) == 0 {
 				continue
 			}

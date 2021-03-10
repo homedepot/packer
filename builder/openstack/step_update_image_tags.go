@@ -6,16 +6,22 @@ import (
 	"strings"
 
 	imageservice "github.com/gophercloud/gophercloud/openstack/imageservice/v2/images"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 type stepUpdateImageTags struct{}
 
 func (s *stepUpdateImageTags) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
-	imageId := state.Get("image").(string)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	config := state.Get("config").(*Config)
+
+	if config.SkipCreateImage {
+		ui.Say("Skipping image update tags...")
+		return multistep.ActionContinue
+	}
+
+	imageId := state.Get("image").(string)
 
 	if len(config.ImageTags) == 0 {
 		return multistep.ActionContinue

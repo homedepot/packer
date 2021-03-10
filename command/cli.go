@@ -4,9 +4,9 @@ import (
 	"flag"
 	"strings"
 
-	"github.com/hashicorp/packer/helper/enumflag"
-	kvflag "github.com/hashicorp/packer/helper/flag-kv"
-	sliceflag "github.com/hashicorp/packer/helper/flag-slice"
+	"github.com/hashicorp/packer/command/enumflag"
+	kvflag "github.com/hashicorp/packer/command/flag-kv"
+	sliceflag "github.com/hashicorp/packer/command/flag-slice"
 )
 
 //go:generate enumer -type configType -trimprefix ConfigType -transform snake
@@ -93,6 +93,18 @@ type BuildArgs struct {
 	OnError                                           string
 }
 
+func (ia *InitArgs) AddFlagSets(flags *flag.FlagSet) {
+	flags.BoolVar(&ia.Upgrade, "upgrade", false, "upgrade any present plugin to the highest allowed version.")
+
+	ia.MetaArgs.AddFlagSets(flags)
+}
+
+// InitArgs represents a parsed cli line for a `packer build`
+type InitArgs struct {
+	MetaArgs
+	Upgrade bool
+}
+
 // ConsoleArgs represents a parsed cli line for a `packer console`
 type ConsoleArgs struct {
 	MetaArgs
@@ -133,12 +145,28 @@ type InspectArgs struct {
 
 func (va *HCL2UpgradeArgs) AddFlagSets(flags *flag.FlagSet) {
 	flags.StringVar(&va.OutputFile, "output-file", "", "File where to put the hcl2 generated config. Defaults to JSON_TEMPLATE.pkr.hcl")
+	flags.BoolVar(&va.WithAnnotations, "with-annotations", false, "Adds helper annotations with information about the generated HCL2 blocks.")
 
 	va.MetaArgs.AddFlagSets(flags)
 }
 
-// HCL2UpgradeArgs represents a parsed cli line for a `packer build`
+// HCL2UpgradeArgs represents a parsed cli line for a `packer hcl2_upgrade`
 type HCL2UpgradeArgs struct {
 	MetaArgs
-	OutputFile string
+	OutputFile      string
+	WithAnnotations bool
+}
+
+func (va *FormatArgs) AddFlagSets(flags *flag.FlagSet) {
+	flags.BoolVar(&va.Check, "check", false, "check if the input is formatted")
+	flags.BoolVar(&va.Diff, "diff", false, "display the diff of formatting changes")
+	flags.BoolVar(&va.Write, "write", true, "overwrite source files instead of writing to stdout")
+
+	va.MetaArgs.AddFlagSets(flags)
+}
+
+// FormatArgs represents a parsed cli line for `packer fmt`
+type FormatArgs struct {
+	MetaArgs
+	Check, Diff, Write bool
 }

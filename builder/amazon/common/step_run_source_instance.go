@@ -11,11 +11,12 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
 
-	"github.com/hashicorp/packer/common/retry"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer/builder/amazon/common/awserrors"
 )
 
 type StepRunSourceInstance struct {
@@ -28,11 +29,15 @@ type StepRunSourceInstance struct {
 	EbsOptimized                      bool
 	EnableT2Unlimited                 bool
 	ExpectedRootDevice                string
+	HttpEndpoint                      string
+	HttpTokens                        string
+	HttpPutResponseHopLimit           int64
 	InstanceInitiatedShutdownBehavior string
 	InstanceType                      string
 	IsRestricted                      bool
 	SourceAMI                         string
 	Tags                              map[string]string
+	Tenancy                           string
 	UserData                          string
 	UserDataFile                      string
 	VolumeTags                        map[string]string
@@ -47,7 +52,7 @@ func (s *StepRunSourceInstance) Run(ctx context.Context, state multistep.StateBa
 	securityGroupIds := aws.StringSlice(state.Get("securityGroupIds").([]string))
 	iamInstanceProfile := aws.String(state.Get("iamInstanceProfile").(string))
 
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	userData := s.UserData
 	if s.UserDataFile != "" {
@@ -142,6 +147,10 @@ func (s *StepRunSourceInstance) Run(ctx context.Context, state multistep.StateBa
 		runOpts.CreditSpecification = &ec2.CreditSpecificationRequest{CpuCredits: &creditOption}
 	}
 
+	if s.HttpEndpoint == "enabled" {
+		runOpts.MetadataOptions = &ec2.InstanceMetadataOptionsRequest{HttpEndpoint: &s.HttpEndpoint, HttpTokens: &s.HttpTokens, HttpPutResponseHopLimit: &s.HttpPutResponseHopLimit}
+	}
+
 	// Collect tags for tagging on resource creation
 	var tagSpecs []*ec2.TagSpecification
 
@@ -195,11 +204,15 @@ func (s *StepRunSourceInstance) Run(ctx context.Context, state multistep.StateBa
 		runOpts.InstanceInitiatedShutdownBehavior = &s.InstanceInitiatedShutdownBehavior
 	}
 
+	if s.Tenancy != "" {
+		runOpts.Placement.Tenancy = aws.String(s.Tenancy)
+	}
+
 	var runResp *ec2.Reservation
 	err = retry.Config{
 		Tries: 11,
 		ShouldRetry: func(err error) bool {
-			if IsAWSErr(err, "InvalidParameterValue", "iamInstanceProfile") {
+			if awserrors.Matches(err, "InvalidParameterValue", "iamInstanceProfile") {
 				return true
 			}
 			return false
@@ -210,7 +223,7 @@ func (s *StepRunSourceInstance) Run(ctx context.Context, state multistep.StateBa
 		return err
 	})
 
-	if IsAWSErr(err, "VPCIdNotSpecified", "No default VPC for this user") && subnetId == "" {
+	if awserrors.Matches(err, "VPCIdNotSpecified", "No default VPC for this user") && subnetId == "" {
 		err := fmt.Errorf("Error launching source instance: a valid Subnet Id was not specified")
 		state.Put("error", err)
 		ui.Error(err.Error())
@@ -239,6 +252,18 @@ func (s *StepRunSourceInstance) Run(ctx context.Context, state multistep.StateBa
 		err := fmt.Errorf("Error waiting for instance (%s) to become ready: %s", instanceId, err)
 		state.Put("error", err)
 		ui.Error(err.Error())
+
+		// try to get some context from AWS on why was instance
+		// transitioned to the unexpected state
+		if resp, e := ec2conn.DescribeInstances(describeInstance); e == nil {
+			if len(resp.Reservations) > 0 && len(resp.Reservations[0].Instances) > 0 {
+				instance := resp.Reservations[0].Instances[0]
+				if instance.StateTransitionReason != nil && instance.StateReason != nil && instance.StateReason.Message != nil {
+					ui.Error(fmt.Sprintf("Instance state change details: %s: %s",
+						*instance.StateTransitionReason, *instance.StateReason.Message))
+				}
+			}
+		}
 		return multistep.ActionHalt
 	}
 
@@ -248,7 +273,7 @@ func (s *StepRunSourceInstance) Run(ctx context.Context, state multistep.StateBa
 
 	var r *ec2.DescribeInstancesOutput
 	err = retry.Config{Tries: 11, ShouldRetry: func(err error) bool {
-		if IsAWSErr(err, "InvalidInstanceID.NotFound", "") {
+		if awserrors.Matches(err, "InvalidInstanceID.NotFound", "") {
 			return true
 		}
 		return false
@@ -293,7 +318,7 @@ func (s *StepRunSourceInstance) Run(ctx context.Context, state multistep.StateBa
 		ec2Tags.Report(ui)
 		// Retry creating tags for about 2.5 minutes
 		err = retry.Config{Tries: 11, ShouldRetry: func(error) bool {
-			if IsAWSErr(err, "InvalidInstanceID.NotFound", "") {
+			if awserrors.Matches(err, "InvalidInstanceID.NotFound", "") {
 				return true
 			}
 			return false
@@ -355,7 +380,7 @@ func (s *StepRunSourceInstance) Run(ctx context.Context, state multistep.StateBa
 func (s *StepRunSourceInstance) Cleanup(state multistep.StateBag) {
 
 	ec2conn := state.Get("ec2").(*ec2.EC2)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	// Terminate the source instance if it exists
 	if s.instanceId != "" {

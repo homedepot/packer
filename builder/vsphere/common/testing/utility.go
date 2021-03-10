@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/vsphere/common"
 	"github.com/hashicorp/packer/builder/vsphere/driver"
-	"github.com/hashicorp/packer/packer"
 )
 
 func NewVMName() string {
@@ -34,7 +34,7 @@ func RenderConfig(config map[string]interface{}) string {
 	return string(j)
 }
 
-func TestConn(t *testing.T) *driver.Driver {
+func TestConn(t *testing.T) driver.Driver {
 	username := os.Getenv("VSPHERE_USERNAME")
 	if username == "" {
 		username = "root"
@@ -56,7 +56,7 @@ func TestConn(t *testing.T) *driver.Driver {
 	return d
 }
 
-func GetVM(t *testing.T, d *driver.Driver, artifacts []packer.Artifact) *driver.VirtualMachine {
+func GetVM(t *testing.T, d driver.Driver, artifacts []packersdk.Artifact) driver.VirtualMachine {
 	artifactRaw := artifacts[0]
 	artifact, _ := artifactRaw.(*common.Artifact)
 

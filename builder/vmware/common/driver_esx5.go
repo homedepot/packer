@@ -11,19 +11,28 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/vmware/govmomi"
+	"github.com/vmware/govmomi/find"
+	"github.com/vmware/govmomi/session"
+	"github.com/vmware/govmomi/vim25"
+	"github.com/vmware/govmomi/vim25/soap"
+	"github.com/vmware/govmomi/vim25/types"
+
 	"github.com/hashicorp/go-getter/v2"
-	"github.com/hashicorp/packer/communicator/ssh"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/multistep"
-	helperssh "github.com/hashicorp/packer/helper/ssh"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	helperssh "github.com/hashicorp/packer-plugin-sdk/communicator/ssh"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/sdk-internals/communicator/ssh"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -43,12 +52,67 @@ type ESX5Driver struct {
 	VMName         string
 	CommConfig     communicator.Config
 
-	comm      packer.Communicator
+	ctx    context.Context
+	client *govmomi.Client
+	finder *find.Finder
+
+	comm      packersdk.Communicator
 	outputDir string
 	vmId      string
 }
 
-func (d *ESX5Driver) Clone(dst, src string, linked bool) error {
+func NewESX5Driver(dconfig *DriverConfig, config *SSHConfig, vmName string) (Driver, error) {
+	ctx := context.TODO()
+
+	vsphereUrl, err := url.Parse(fmt.Sprintf("https://%v/sdk", dconfig.RemoteHost))
+	if err != nil {
+		return nil, err
+	}
+	credentials := url.UserPassword(dconfig.RemoteUser, dconfig.RemotePassword)
+	vsphereUrl.User = credentials
+
+	soapClient := soap.NewClient(vsphereUrl, true)
+	vimClient, err := vim25.NewClient(ctx, soapClient)
+	if err != nil {
+		return nil, err
+	}
+
+	vimClient.RoundTripper = session.KeepAlive(vimClient.RoundTripper, 10*time.Minute)
+	client := &govmomi.Client{
+		Client:         vimClient,
+		SessionManager: session.NewManager(vimClient),
+	}
+
+	err = client.SessionManager.Login(ctx, credentials)
+	if err != nil {
+		return nil, err
+	}
+
+	finder := find.NewFinder(client.Client, false)
+	datacenter, err := finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, err
+	}
+	finder.SetDatacenter(datacenter)
+
+	return &ESX5Driver{
+		Host:           dconfig.RemoteHost,
+		Port:           dconfig.RemotePort,
+		Username:       dconfig.RemoteUser,
+		Password:       dconfig.RemotePassword,
+		PrivateKeyFile: dconfig.RemotePrivateKey,
+		Datastore:      dconfig.RemoteDatastore,
+		CacheDatastore: dconfig.RemoteCacheDatastore,
+		CacheDirectory: dconfig.RemoteCacheDirectory,
+		VMName:         vmName,
+		CommConfig:     config.Comm,
+		ctx:            ctx,
+		client:         client,
+		finder:         finder,
+	}, nil
+}
+
+func (d *ESX5Driver) Clone(dst, src string, linked bool, snapshot string) error {
 
 	linesToArray := func(lines string) []string { return strings.Split(strings.Trim(lines, "\r\n"), "\n") }
 
@@ -185,7 +249,7 @@ func (d *ESX5Driver) IsDestroyed() (bool, error) {
 	return true, err
 }
 
-func (d *ESX5Driver) UploadISO(localPath string, checksum string, ui packer.Ui) (string, error) {
+func (d *ESX5Driver) UploadISO(localPath string, checksum string, ui packersdk.Ui) (string, error) {
 	finalPath := d.CachePath(localPath)
 	if err := d.mkdir(filepath.ToSlash(filepath.Dir(finalPath))); err != nil {
 		return "", err
@@ -260,6 +324,74 @@ func (d *ESX5Driver) Verify() error {
 			return err
 		}
 	}
+	return nil
+}
+
+func (d *ESX5Driver) VerifyOvfTool(SkipExport, skipValidateCredentials bool) error {
+	// We don't use ovftool if we aren't exporting a VM; return without error
+	// if ovftool isn't on path.
+	if SkipExport {
+		return nil
+	}
+
+	err := d.base.VerifyOvfTool(SkipExport, skipValidateCredentials)
+	if err != nil {
+		return err
+	}
+
+	if skipValidateCredentials {
+		return nil
+	}
+
+	log.Printf("Verifying that ovftool credentials are valid...")
+	// check that password is valid by sending a dummy ovftool command
+	// now, so that we don't fail for a simple mistake after a long
+	// build
+	ovftool := GetOVFTool()
+
+	if d.Password == "" {
+		return fmt.Errorf("exporting the vm from esxi with ovftool requires " +
+			"that you set a value for remote_password")
+	}
+
+	// Generate the uri of the host, with embedded credentials
+	ovftool_uri := fmt.Sprintf("vi://%s", d.Host)
+	u, err := url.Parse(ovftool_uri)
+	if err != nil {
+		return fmt.Errorf("Couldn't generate uri for ovftool: %s", err)
+	}
+	u.User = url.UserPassword(d.Username, d.Password)
+
+	ovfToolArgs := []string{"--noSSLVerify", "--verifyOnly", u.String()}
+
+	var out bytes.Buffer
+	cmdCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cmdCtx, ovftool, ovfToolArgs...)
+	cmd.Stdout = &out
+
+	// Need to manually close stdin or else the ofvtool call will hang
+	// forever in a situation where the user has provided an invalid
+	// password or username
+	stdin, _ := cmd.StdinPipe()
+	defer stdin.Close()
+
+	if err := cmd.Run(); err != nil {
+		outString := out.String()
+		// The command *should* fail with this error, if it
+		// authenticates properly.
+		if !strings.Contains(outString, "Found wrong kind of object") {
+			err := fmt.Errorf("ovftool validation error: %s; %s",
+				err, outString)
+			if strings.Contains(outString,
+				"Enter login information for source") {
+				err = fmt.Errorf("The username or password you " +
+					"provided to ovftool is invalid.")
+			}
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -667,7 +799,7 @@ func (d *ESX5Driver) mkdir(path string) error {
 	return d.sh("mkdir", "-p", strconv.Quote(path))
 }
 
-func (d *ESX5Driver) upload(dst, src string, ui packer.Ui) error {
+func (d *ESX5Driver) upload(dst, src string, ui packersdk.Ui) error {
 	// Get size so we can set up progress tracker
 	info, err := os.Stat(src)
 	if err != nil {
@@ -738,7 +870,7 @@ func (d *ESX5Driver) ssh(command string, stdin io.Reader) (*bytes.Buffer, error)
 	ctx := context.TODO()
 	var stdout, stderr bytes.Buffer
 
-	cmd := &packer.RemoteCmd{
+	cmd := &packersdk.RemoteCmd{
 		Command: command,
 		Stdout:  &stdout,
 		Stderr:  &stderr,
@@ -822,4 +954,12 @@ func (r *esxcliReader) find(key, val string) (map[string]string, error) {
 			return record, nil
 		}
 	}
+}
+
+func (d *ESX5Driver) AcquireVNCOverWebsocketTicket() (*types.VirtualMachineTicket, error) {
+	vm, err := d.finder.VirtualMachine(d.ctx, d.VMName)
+	if err != nil {
+		return nil, err
+	}
+	return vm.AcquireTicket(d.ctx, string(types.VirtualMachineTicketTypeWebmks))
 }

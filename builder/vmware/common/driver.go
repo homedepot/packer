@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 )
 
 // A driver is able to talk to VMware, control virtual machines, etc.
@@ -23,7 +23,7 @@ type Driver interface {
 	// Clone clones the VMX and the disk to the destination path. The
 	// destination is a path to the VMX file. The disk will be copied
 	// to that same directory.
-	Clone(dst string, src string, cloneType bool) error
+	Clone(dst string, src string, cloneType bool, snapshot string) error
 
 	// CompactDisk compacts a virtual disk.
 	CompactDisk(string) error
@@ -80,6 +80,9 @@ type Driver interface {
 
 	// Export the vm to ovf or ova format using ovftool
 	Export([]string) error
+
+	// OvfTool
+	VerifyOvfTool(bool, bool) error
 }
 
 // NewDriver returns a new driver implementation for this operating
@@ -88,56 +91,27 @@ func NewDriver(dconfig *DriverConfig, config *SSHConfig, vmName string) (Driver,
 	drivers := []Driver{}
 
 	if dconfig.RemoteType != "" {
-		drivers = []Driver{
-			&ESX5Driver{
-				Host:           dconfig.RemoteHost,
-				Port:           dconfig.RemotePort,
-				Username:       dconfig.RemoteUser,
-				Password:       dconfig.RemotePassword,
-				PrivateKeyFile: dconfig.RemotePrivateKey,
-				Datastore:      dconfig.RemoteDatastore,
-				CacheDatastore: dconfig.RemoteCacheDatastore,
-				CacheDirectory: dconfig.RemoteCacheDirectory,
-				VMName:         vmName,
-				CommConfig:     config.Comm,
-			},
+		esx5Driver, err := NewESX5Driver(dconfig, config, vmName)
+		if err != nil {
+			return nil, err
 		}
+		drivers = []Driver{esx5Driver}
 
 	} else {
 		switch runtime.GOOS {
 		case "darwin":
 			drivers = []Driver{
-				&Fusion6Driver{
-					Fusion5Driver: Fusion5Driver{
-						AppPath:   dconfig.FusionAppPath,
-						SSHConfig: config,
-					},
-				},
-				&Fusion5Driver{
-					AppPath:   dconfig.FusionAppPath,
-					SSHConfig: config,
-				},
+				NewFusion6Driver(dconfig, config),
+				NewFusion5Driver(dconfig, config),
 			}
 		case "linux":
 			fallthrough
 		case "windows":
 			drivers = []Driver{
-				&Workstation10Driver{
-					Workstation9Driver: Workstation9Driver{
-						SSHConfig: config,
-					},
-				},
-				&Workstation9Driver{
-					SSHConfig: config,
-				},
-				&Player6Driver{
-					Player5Driver: Player5Driver{
-						SSHConfig: config,
-					},
-				},
-				&Player5Driver{
-					SSHConfig: config,
-				},
+				NewWorkstation10Driver(config),
+				NewWorkstation9Driver(config),
+				NewPlayer6Driver(config),
+				NewPlayer5Driver(config),
 			}
 		default:
 			return nil, fmt.Errorf("can't find driver for OS: %s", runtime.GOOS)
@@ -456,6 +430,56 @@ func (d *VmwareDriver) PotentialGuestIP(state multistep.StateBag) ([]string, err
 		return addrs, nil
 	}
 
+	if runtime.GOOS == "darwin" {
+		// We have match no vmware DHCP lease for this MAC. We'll try to match it in Apple DHCP leases.
+		// As a remember, VMWare is no longer able to rely on its own dhcpd server on MacOS BigSur and is
+		// forced to use Apple DHCPD server instead.
+		// https://communities.vmware.com/t5/VMware-Fusion-Discussions/Big-Sur-hosts-with-Fusion-Is-vmnet-dhcpd-vmnet8-leases-file/m-p/2298927/highlight/true#M140003
+
+		// set the apple dhcp leases path
+		appleDhcpLeasesPath := "/var/db/dhcpd_leases"
+		log.Printf("Trying Apple DHCP leases path: %s", appleDhcpLeasesPath)
+
+		// open up the path to the apple dhcpd leases
+		fh, err := os.Open(appleDhcpLeasesPath)
+		if err != nil {
+			log.Printf("Error while reading apple DHCP lease path file %s: %s", appleDhcpLeasesPath, err.Error())
+		} else {
+			defer fh.Close()
+
+			// and then read its contents
+			leaseEntries, err := ReadAppleDhcpdLeaseEntries(fh)
+			if err != nil {
+				return []string{}, err
+			}
+
+			// Parse our MAC address again. There's no need to check for an
+			// error because we've already parsed this successfully.
+			hwaddr, _ := net.ParseMAC(MACAddress)
+
+			// Go through our available lease entries and see which ones are within
+			// scope, and that match to our hardware address.
+			available_lease_entries := make([]appleDhcpLeaseEntry, 0)
+			for _, entry := range leaseEntries {
+				// Next check for any where the hardware address matches.
+				if bytes.Equal(hwaddr, entry.hwAddress) {
+					available_lease_entries = append(available_lease_entries, entry)
+				}
+			}
+
+			// Check if we found any lease entries that correspond to us. If so, then we
+			// need to map() them in order to extract the address field to return to the
+			// caller.
+			if len(available_lease_entries) > 0 {
+				addrs := make([]string, 0)
+				for _, entry := range available_lease_entries {
+					addrs = append(addrs, entry.ipAddress)
+				}
+				return addrs, nil
+			}
+		}
+	}
+
 	return []string{}, fmt.Errorf("None of the found device(s) %v has a DHCP lease for MAC %s", devices, MACAddress)
 }
 
@@ -627,4 +651,23 @@ func (d *VmwareDriver) Export(args []string) error {
 	}
 
 	return nil
+}
+
+func (d *VmwareDriver) VerifyOvfTool(SkipExport, _ bool) error {
+	if SkipExport {
+		return nil
+	}
+
+	log.Printf("Verifying that ovftool exists...")
+	// Validate that tool exists, but no need to validate credentials.
+	ovftool := GetOVFTool()
+	if ovftool != "" {
+		return nil
+	} else {
+		return fmt.Errorf("Couldn't find ovftool in path! Please either " +
+			"set `skip_export = true` and remove the `format` option " +
+			"from your template, or make sure ovftool is installed on " +
+			"your build system. ")
+	}
+
 }

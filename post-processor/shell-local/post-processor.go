@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
-	sl "github.com/hashicorp/packer/common/shell-local"
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	sl "github.com/hashicorp/packer-plugin-sdk/shell-local"
 )
 
 type PostProcessor struct {
@@ -40,7 +40,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	return sl.Validate(&p.config)
 }
 
-func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, bool, error) {
+func (p *PostProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, artifact packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
 	generatedData := make(map[string]interface{})
 	artifactStateData := artifact.State("generated_data")
 	if artifactStateData != nil {

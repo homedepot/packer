@@ -6,10 +6,11 @@ import (
 	"io"
 	"os"
 
-	kvflag "github.com/hashicorp/packer/helper/flag-kv"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template"
+	kvflag "github.com/hashicorp/packer/command/flag-kv"
 	"github.com/hashicorp/packer/helper/wrappedstreams"
 	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template"
 )
 
 // FlagSetFlags is an enum to define what flags are present in the
@@ -26,7 +27,7 @@ const (
 // Packer command inherits.
 type Meta struct {
 	CoreConfig *packer.CoreConfig
-	Ui         packer.Ui
+	Ui         packersdk.Ui
 	Version    string
 }
 

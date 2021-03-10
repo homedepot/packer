@@ -7,13 +7,13 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/vsphere/driver"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 type HardwareConfig struct {
-	// Number of CPU sockets.
+	// Number of CPU cores.
 	CPUs int32 `mapstructure:"CPUs"`
 	// Number of CPU cores per socket.
 	CpuCores int32 `mapstructure:"cpu_cores"`
@@ -64,8 +64,8 @@ type StepConfigureHardware struct {
 }
 
 func (s *StepConfigureHardware) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
-	ui := state.Get("ui").(packer.Ui)
-	vm := state.Get("vm").(*driver.VirtualMachine)
+	ui := state.Get("ui").(packersdk.Ui)
+	vm := state.Get("vm").(driver.VirtualMachine)
 
 	if *s.Config != (HardwareConfig{}) {
 		ui.Say("Customizing hardware...")

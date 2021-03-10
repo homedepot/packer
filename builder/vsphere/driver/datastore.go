@@ -13,29 +13,41 @@ import (
 	"github.com/vmware/govmomi/vim25/types"
 )
 
-type Datastore struct {
-	ds     *object.Datastore
-	driver *Driver
+type Datastore interface {
+	Info(params ...string) (*mo.Datastore, error)
+	FileExists(path string) bool
+	DirExists(path string) bool
+	Name() string
+	ResolvePath(path string) string
+	UploadFile(src, dst, host string, setHost bool) error
+	Delete(path string) error
+	MakeDirectory(path string) error
+	Reference() types.ManagedObjectReference
 }
 
-func (d *Driver) NewDatastore(ref *types.ManagedObjectReference) *Datastore {
-	return &Datastore{
+type DatastoreDriver struct {
+	ds     *object.Datastore
+	driver *VCenterDriver
+}
+
+func (d *VCenterDriver) NewDatastore(ref *types.ManagedObjectReference) Datastore {
+	return &DatastoreDriver{
 		ds:     object.NewDatastore(d.client.Client, *ref),
 		driver: d,
 	}
 }
 
 // If name is an empty string, then resolve host's one
-func (d *Driver) FindDatastore(name string, host string) (*Datastore, error) {
+func (d *VCenterDriver) FindDatastore(name string, host string) (Datastore, error) {
 	if name == "" {
 		h, err := d.FindHost(host)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Error finding host for to get datastore: %s", err)
 		}
 
 		i, err := h.Info("datastore")
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Error getting datastore info from host: %s", err)
 		}
 
 		if len(i.Datastore) > 1 {
@@ -45,23 +57,23 @@ func (d *Driver) FindDatastore(name string, host string) (*Datastore, error) {
 		ds := d.NewDatastore(&i.Datastore[0])
 		inf, err := ds.Info("name")
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Error getting datastore name: %s", err)
 		}
 		name = inf.Name
 	}
 
 	ds, err := d.finder.Datastore(d.ctx, name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Error finding datastore with name %s: %s", name, err)
 	}
 
-	return &Datastore{
+	return &DatastoreDriver{
 		ds:     ds,
 		driver: d,
 	}, nil
 }
 
-func (d *Driver) GetDatastoreName(id string) (string, error) {
+func (d *VCenterDriver) GetDatastoreName(id string) (string, error) {
 	obj := types.ManagedObjectReference{
 		Type:  "Datastore",
 		Value: id,
@@ -76,7 +88,7 @@ func (d *Driver) GetDatastoreName(id string) (string, error) {
 	return me.Name, nil
 }
 
-func (ds *Datastore) Info(params ...string) (*mo.Datastore, error) {
+func (ds *DatastoreDriver) Info(params ...string) (*mo.Datastore, error) {
 	var p []string
 	if len(params) == 0 {
 		p = []string{"*"}
@@ -91,21 +103,33 @@ func (ds *Datastore) Info(params ...string) (*mo.Datastore, error) {
 	return &info, nil
 }
 
-func (ds *Datastore) FileExists(path string) bool {
+func (ds *DatastoreDriver) DirExists(filepath string) bool {
+	_, err := ds.ds.Stat(ds.driver.ctx, filepath)
+	if _, ok := err.(object.DatastoreNoSuchDirectoryError); ok {
+		return false
+	}
+	return true
+}
+
+func (ds *DatastoreDriver) FileExists(path string) bool {
 	_, err := ds.ds.Stat(ds.driver.ctx, path)
 	return err == nil
 }
 
-func (ds *Datastore) Name() string {
+func (ds *DatastoreDriver) Name() string {
 	return ds.ds.Name()
 }
 
-func (ds *Datastore) ResolvePath(path string) string {
+func (ds *DatastoreDriver) Reference() types.ManagedObjectReference {
+	return ds.ds.Reference()
+}
+
+func (ds *DatastoreDriver) ResolvePath(path string) string {
 	return ds.ds.Path(path)
 }
 
 // The file ID isn't available via the API, so we use DatastoreBrowser to search
-func (d *Driver) GetDatastoreFilePath(datastoreID, dir, filename string) (string, error) {
+func (d *VCenterDriver) GetDatastoreFilePath(datastoreID, dir, filename string) (string, error) {
 	ref := types.ManagedObjectReference{Type: "Datastore", Value: datastoreID}
 	ds := object.NewDatastore(d.vimClient, ref)
 
@@ -140,11 +164,11 @@ func (d *Driver) GetDatastoreFilePath(datastoreID, dir, filename string) (string
 	return res.File[0].GetFileInfo().Path, nil
 }
 
-func (ds *Datastore) UploadFile(src, dst, host string, set_host_for_datastore_uploads bool) error {
+func (ds *DatastoreDriver) UploadFile(src, dst, host string, setHost bool) error {
 	p := soap.DefaultUpload
 	ctx := ds.driver.ctx
 
-	if set_host_for_datastore_uploads && host != "" {
+	if setHost && host != "" {
 		h, err := ds.driver.FindHost(host)
 		if err != nil {
 			return err
@@ -155,7 +179,7 @@ func (ds *Datastore) UploadFile(src, dst, host string, set_host_for_datastore_up
 	return ds.ds.UploadFile(ctx, src, dst, &p)
 }
 
-func (ds *Datastore) Delete(path string) error {
+func (ds *DatastoreDriver) Delete(path string) error {
 	dc, err := ds.driver.finder.Datacenter(ds.driver.ctx, ds.ds.DatacenterPath)
 	if err != nil {
 		return err
@@ -164,7 +188,7 @@ func (ds *Datastore) Delete(path string) error {
 	return fm.Delete(ds.driver.ctx, path)
 }
 
-func (ds *Datastore) MakeDirectory(path string) error {
+func (ds *DatastoreDriver) MakeDirectory(path string) error {
 	dc, err := ds.driver.finder.Datacenter(ds.driver.ctx, ds.ds.DatacenterPath)
 	if err != nil {
 		return err
@@ -193,8 +217,9 @@ func (d *DatastoreIsoPath) Validate() bool {
 	// [datastore] /dir/subdir/file
 	// [datastore] dir/subdir/file
 	// [] /dir/subdir/file
-	// /dir/subdir/file or dir/subdir/file
-	matched, _ := regexp.MatchString(`^((\[\w*\])?\s*([^\[\]]+))$`, d.path)
+	// [data-store] /dir/subdir/file
+	// dir/subdir/file or dir/subdir/file
+	matched, _ := regexp.MatchString(`^\s*(\[[^\[\]\/]*\])?\s*[^\[\]]+\s*$`, d.path)
 	return matched
 }
 
@@ -204,7 +229,7 @@ func (d *DatastoreIsoPath) GetFilePath() string {
 	if len(parts) > 1 {
 		// removes datastore name from path
 		filePath = parts[1]
-		filePath = strings.TrimLeft(filePath, " ")
+		filePath = strings.TrimSpace(filePath)
 	}
 	return filePath
 }

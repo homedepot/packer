@@ -8,12 +8,12 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/yandex"
-	"github.com/hashicorp/packer/packer"
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/compute/v1"
 )
 
-func uploadToBucket(s3conn *s3.S3, ui packer.Ui, artifact packer.Artifact, bucket string, objectName string) (cloudImageSource, error) {
+func uploadToBucket(s3conn *s3.S3, ui packersdk.Ui, artifact packersdk.Artifact, bucket string, objectName string) (cloudImageSource, error) {
 	ui.Say("Looking for qcow2 file in list of artifacts...")
 	source := ""
 	for _, path := range artifact.Files() {
@@ -55,18 +55,26 @@ func uploadToBucket(s3conn *s3.S3, ui packer.Ui, artifact packer.Artifact, bucke
 	// Compute service allow only `https://storage.yandexcloud.net/...` URLs for Image create process
 	req.Config.S3ForcePathStyle = aws.Bool(true)
 
+	err = req.Build()
+	if err != nil {
+		ui.Say(fmt.Sprintf("Failed to build S3 request: %v", err))
+		return nil, err
+	}
+
 	return &objectSource{
 		url: req.HTTPRequest.URL.String(),
 	}, nil
 }
 
-func createYCImage(ctx context.Context, driver yandex.Driver, ui packer.Ui, folderID string, imageSrc cloudImageSource, imageName string, imageDescription string, imageFamily string, imageLabels map[string]string) (*compute.Image, error) {
+func createYCImage(ctx context.Context, driver yandex.Driver, ui packersdk.Ui, imageSrc cloudImageSource, c *Config) (*compute.Image, error) {
 	req := &compute.CreateImageRequest{
-		FolderId:    folderID,
-		Name:        imageName,
-		Description: imageDescription,
-		Labels:      imageLabels,
-		Family:      imageFamily,
+		FolderId:    c.CloudConfig.FolderID,
+		Name:        c.ImageConfig.ImageName,
+		Description: c.ImageConfig.ImageDescription,
+		Labels:      c.ImageConfig.ImageLabels,
+		Family:      c.ImageConfig.ImageFamily,
+		MinDiskSize: int64(c.ImageMinDiskSizeGb),
+		ProductIds:  c.ImageProductIDs,
 	}
 
 	// switch on cloudImageSource type: cloud image id or storage URL
@@ -85,7 +93,7 @@ func createYCImage(ctx context.Context, driver yandex.Driver, ui packer.Ui, fold
 
 	ui.Say(fmt.Sprintf("Source of Image creation: %s", imageSrc.Description()))
 
-	ui.Say(fmt.Sprintf("Creating Yandex Compute Image %v within operation %#v", imageName, op.Id()))
+	ui.Say(fmt.Sprintf("Creating Yandex Compute Image %v within operation %#v", c.ImageName, op.Id()))
 
 	ui.Say("Waiting for Yandex Compute Image creation operation to complete...")
 	err = op.Wait(ctx)
@@ -116,7 +124,7 @@ func createYCImage(ctx context.Context, driver yandex.Driver, ui packer.Ui, fold
 
 }
 
-func deleteFromBucket(s3conn *s3.S3, ui packer.Ui, imageSrc cloudImageSource) error {
+func deleteFromBucket(s3conn *s3.S3, ui packersdk.Ui, imageSrc cloudImageSource) error {
 	var url string
 	// switch on cloudImageSource type: cloud image id or storage URL
 	switch v := imageSrc.(type) {

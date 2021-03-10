@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	vboxcommon "github.com/hashicorp/packer/builder/virtualbox/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 type StepCreateSnapshot struct {
@@ -17,7 +17,7 @@ type StepCreateSnapshot struct {
 
 func (s *StepCreateSnapshot) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(vboxcommon.Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	if s.TargetSnapshot != "" {
 		running, err := driver.IsRunning(s.Name)
 		if err != nil {

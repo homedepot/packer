@@ -13,9 +13,11 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclparse"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template"
 	"github.com/hashicorp/packer/hcl2template"
 	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template"
+	"github.com/hashicorp/packer/version"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/hako/durafmt"
@@ -62,16 +64,16 @@ func (c *BuildCommand) ParseArgs(args []string) (*BuildArgs, int) {
 
 func (m *Meta) GetConfigFromHCL(cla *MetaArgs) (*hcl2template.PackerConfig, int) {
 	parser := &hcl2template.Parser{
-		Parser:                hclparse.NewParser(),
-		BuilderSchemas:        m.CoreConfig.Components.BuilderStore,
-		ProvisionersSchemas:   m.CoreConfig.Components.ProvisionerStore,
-		PostProcessorsSchemas: m.CoreConfig.Components.PostProcessorStore,
+		CorePackerVersion:       version.SemVer,
+		CorePackerVersionString: version.FormattedVersion(),
+		Parser:                  hclparse.NewParser(),
+		PluginConfig:            m.CoreConfig.Components.PluginConfig,
 	}
 	cfg, diags := parser.Parse(cla.Path, cla.VarFiles, cla.Vars)
 	return cfg, writeDiags(m.Ui, parser.Files(), diags)
 }
 
-func writeDiags(ui packer.Ui, files map[string]*hcl.File, diags hcl.Diagnostics) int {
+func writeDiags(ui packersdk.Ui, files map[string]*hcl.File, diags hcl.Diagnostics) int {
 	// write HCL errors/diagnostics if any.
 	b := bytes.NewBuffer(nil)
 	err := hcl.NewDiagnosticTextWriter(b, files, 80, false).WriteDiagnostics(diags)
@@ -124,7 +126,11 @@ func (m *Meta) GetConfigFromJSON(cla *MetaArgs) (packer.Handler, int) {
 	}
 
 	if err != nil {
-		m.Ui.Error(fmt.Sprintf("Failed to parse template: %s", err))
+		m.Ui.Error(fmt.Sprintf("Failed to parse file as legacy JSON template: "+
+			"if you are using an HCL template, check your file extensions; they "+
+			"should be either *.pkr.hcl or *.pkr.json; see the docs for more "+
+			"details: https://www.packer.io/docs/templates/hcl_templates. \n"+
+			"Original error: %s", err))
 		return nil, 1
 	}
 
@@ -143,7 +149,7 @@ func (c *BuildCommand) RunContext(buildCtx context.Context, cla *BuildArgs) int 
 	if ret != 0 {
 		return ret
 	}
-	diags := packerStarter.Initialize()
+	diags := packerStarter.Initialize(packer.InitializeOptions{})
 	ret = writeDiags(c.Ui, nil, diags)
 	if ret != 0 {
 		return ret
@@ -173,7 +179,7 @@ func (c *BuildCommand) RunContext(buildCtx context.Context, cla *BuildArgs) int 
 		packer.UiColorYellow,
 		packer.UiColorBlue,
 	}
-	buildUis := make(map[packer.Build]packer.Ui)
+	buildUis := make(map[packersdk.Build]packersdk.Ui)
 	for i := range builds {
 		ui := c.Ui
 		if cla.Color {
@@ -211,8 +217,8 @@ func (c *BuildCommand) RunContext(buildCtx context.Context, cla *BuildArgs) int 
 	var wg sync.WaitGroup
 	var artifacts = struct {
 		sync.RWMutex
-		m map[string][]packer.Artifact
-	}{m: make(map[string][]packer.Artifact)}
+		m map[string][]packersdk.Artifact
+	}{m: make(map[string][]packersdk.Artifact)}
 	// Get the builds we care about
 	var errors = struct {
 		sync.RWMutex
@@ -382,7 +388,7 @@ Options:
 
   -color=false                  Disable color output. (Default: color)
   -debug                        Debug mode enabled for builds.
-  -except=foo,bar,baz           Run all builds and post-procesors other than these.
+  -except=foo,bar,baz           Run all builds and post-processors other than these.
   -only=foo,bar,baz             Build only the specified builds.
   -force                        Force a build to continue if artifacts exist, deletes existing artifacts.
   -machine-readable             Produce machine-readable output.
@@ -390,7 +396,7 @@ Options:
   -parallel-builds=1            Number of builds to run in parallel. 1 disables parallelization. 0 means no limit (Default: 0)
   -timestamp-ui                 Enable prefixing of each ui output with an RFC3339 timestamp.
   -var 'key=value'              Variable for templates, can be used multiple times.
-  -var-file=path                JSON file containing user variables.
+  -var-file=path                JSON or HCL2 file containing user variables.
 `
 
 	return strings.TrimSpace(helpText)

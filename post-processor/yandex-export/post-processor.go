@@ -6,62 +6,68 @@ package yandexexport
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"log"
-	"os"
+	"math"
 	"strings"
-	"time"
 
-	"github.com/yandex-cloud/go-sdk/iamkey"
-
+	"github.com/c2h5oh/datasize"
 	"github.com/hashicorp/hcl/v2/hcldec"
-	"github.com/hashicorp/packer/builder"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	"github.com/hashicorp/packer-plugin-sdk/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/packerbuilderdata"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer/builder/file"
 	"github.com/hashicorp/packer/builder/yandex"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 	"github.com/hashicorp/packer/post-processor/artifice"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/yandex-cloud/go-genproto/yandex/cloud/compute/v1"
+	"github.com/yandex-cloud/go-genproto/yandex/cloud/iam/v1"
+	ycsdk "github.com/yandex-cloud/go-sdk"
 )
 
-const defaultStorageEndpoint = "storage.yandexcloud.net"
+const (
+	defaultStorageEndpoint   = "storage.yandexcloud.net"
+	defaultStorageRegion     = "ru-central1"
+	defaultSourceImageFamily = "ubuntu-1604-lts"
+)
 
 type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
+	yandex.AccessConfig `mapstructure:",squash"`
+	yandex.CommonConfig `mapstructure:",squash"`
+	ExchangeConfig      `mapstructure:",squash"`
+	communicator.SSH    `mapstructure:",squash"`
+	communicator.Config `mapstructure:"-"`
 
 	// List of paths to Yandex Object Storage where exported image will be uploaded.
 	// Please be aware that use of space char inside path not supported.
-	// Also this param support [build](/docs/templates/engine) template function.
+	// Also this param support [build](/docs/templates/legacy_json_templates/engine) template function.
 	// Check available template data for [Yandex](/docs/builders/yandex#build-template-data) builder.
 	// Paths to Yandex Object Storage where exported image will be uploaded.
 	Paths []string `mapstructure:"paths" required:"true"`
-	// The folder ID that will be used to launch a temporary instance.
-	// Alternatively you may set value by environment variable YC_FOLDER_ID.
-	FolderID string `mapstructure:"folder_id" required:"true"`
-	// Service Account ID with proper permission to modify an instance, create and attach disk and
-	// make upload to specific Yandex Object Storage paths.
-	ServiceAccountID string `mapstructure:"service_account_id" required:"true"`
-	// The size of the disk in GB. This defaults to `100`, which is 100GB.
-	DiskSizeGb int `mapstructure:"disk_size" required:"false"`
-	// Specify disk type for the launched instance. Defaults to `network-ssd`.
-	DiskType string `mapstructure:"disk_type" required:"false"`
-	// Identifier of the hardware platform configuration for the instance. This defaults to `standard-v2`.
-	PlatformID string `mapstructure:"platform_id" required:"false"`
-	// The Yandex VPC subnet id to use for
-	// the launched instance. Note, the zone of the subnet must match the
-	// zone in which the VM is launched.
-	SubnetID string `mapstructure:"subnet_id" required:"false"`
-	// The name of the zone to launch the instance.  This defaults to `ru-central1-a`.
-	Zone string `mapstructure:"zone" required:"false"`
-	// OAuth token to use to authenticate to Yandex.Cloud. Alternatively you may set
-	// value by environment variable YC_TOKEN.
-	Token string `mapstructure:"token" required:"false"`
-	// Path to file with Service Account key in json format. This
-	// is an alternative method to authenticate to Yandex.Cloud. Alternatively you may set environment variable
-	// YC_SERVICE_ACCOUNT_KEY_FILE.
-	ServiceAccountKeyFile string `mapstructure:"service_account_key_file" required:"false"`
 
-	ctx interpolate.Context
+	// The ID of the folder containing the source image. Default `standard-images`.
+	SourceImageFolderID string `mapstructure:"source_image_folder_id" required:"false"`
+	// The source image family to start export process. Default `ubuntu-1604-lts`.
+	// Image must contains utils or supported package manager: `apt` or `yum` -
+	// requires `root` or `sudo` without password.
+	// Utils: `qemu-img`, `aws`. The `qemu-img` utility requires `root` user or
+	// `sudo` access without password.
+	SourceImageFamily string `mapstructure:"source_image_family" required:"false"`
+	// The source image ID to use to create the new image from. Just one of a source_image_id or
+	// source_image_family must be specified.
+	SourceImageID string `mapstructure:"source_image_id" required:"false"`
+	// The extra size of the source disk in GB. This defaults to `0GB`.
+	// Requires `losetup` utility on the instance.
+	// > **Careful!** Increases payment cost.
+	// > See [perfomance](https://cloud.yandex.com/docs/compute/concepts/disk#performance).
+	SourceDiskExtraSize int `mapstructure:"source_disk_extra_size" required:"false"`
+	ctx                 interpolate.Context
 }
 
 type PostProcessor struct {
@@ -73,6 +79,7 @@ func (p *PostProcessor) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMap
 
 func (p *PostProcessor) Configure(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -85,81 +92,94 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		return err
 	}
 
-	errs := new(packer.MultiError)
+	// Accumulate any errors
+	var errs *packersdk.MultiError
+
+	errs = packersdk.MultiErrorAppend(errs, p.config.AccessConfig.Prepare(&p.config.ctx)...)
+
+	// Set defaults.
+	if p.config.DiskSizeGb == 0 {
+		p.config.DiskSizeGb = 100
+	}
+	if p.config.SSH.SSHUsername == "" {
+		p.config.SSH.SSHUsername = "ubuntu"
+	}
+	p.config.Config = communicator.Config{
+		Type: "ssh",
+		SSH:  p.config.SSH,
+	}
+	errs = packersdk.MultiErrorAppend(errs, p.config.Config.Prepare(&p.config.ctx)...)
+
+	if p.config.SourceImageID == "" {
+		if p.config.SourceImageFamily == "" {
+			p.config.SourceImageFamily = defaultSourceImageFamily
+		}
+		if p.config.SourceImageFolderID == "" {
+			p.config.SourceImageFolderID = yandex.StandardImagesFolderID
+		}
+	}
+	if p.config.SourceDiskExtraSize < 0 {
+		errs = packer.MultiErrorAppend(errs, fmt.Errorf("source_disk_extra_size must be greater than zero"))
+	}
+
+	errs = p.config.CommonConfig.Prepare(errs)
+	errs = p.config.ExchangeConfig.Prepare(errs)
 
 	if len(p.config.Paths) == 0 {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("paths must be specified"))
 	}
 
 	// Validate templates in 'paths'
 	for _, path := range p.config.Paths {
 		if err = interpolate.Validate(path, &p.config.ctx); err != nil {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("Error parsing one of 'paths' template: %s", err))
 		}
-	}
-
-	// provision config by OS environment variables
-	if p.config.Token == "" {
-		p.config.Token = os.Getenv("YC_TOKEN")
-	}
-
-	if p.config.ServiceAccountKeyFile == "" {
-		p.config.ServiceAccountKeyFile = os.Getenv("YC_SERVICE_ACCOUNT_KEY_FILE")
-	}
-
-	if p.config.Token != "" && p.config.ServiceAccountKeyFile != "" {
-		errs = packer.MultiErrorAppend(
-			errs, fmt.Errorf("one of token or service account key file must be specified, not both"))
-	}
-
-	if p.config.Token != "" {
-		packer.LogSecretFilter.Set(p.config.Token)
-	}
-
-	if p.config.ServiceAccountKeyFile != "" {
-		if _, err := iamkey.ReadFromJSONFile(p.config.ServiceAccountKeyFile); err != nil {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("fail to read service account key file: %s", err))
-		}
-	}
-
-	if p.config.FolderID == "" {
-		p.config.FolderID = os.Getenv("YC_FOLDER_ID")
-	}
-
-	// Set defaults.
-	if p.config.DiskSizeGb == 0 {
-		p.config.DiskSizeGb = 100
-	}
-
-	if p.config.DiskType == "" {
-		p.config.DiskType = "network-ssd"
-	}
-
-	if p.config.PlatformID == "" {
-		p.config.PlatformID = "standard-v2"
-	}
-
-	if p.config.Zone == "" {
-		p.config.Zone = "ru-central1-a"
 	}
 
 	if len(errs.Errors) > 0 {
 		return errs
 	}
 
+	// Due to the fact that now it's impossible to go to the object storage
+	// through the internal network - we need access
+	// to the global Internet: either through ipv4 or ipv6
+	// TODO: delete this when access appears
+	if p.config.UseIPv4Nat == false && p.config.UseIPv6 == false {
+		log.Printf("[DEBUG] Force use IPv4")
+		p.config.UseIPv4Nat = true
+	}
+	p.config.Preemptible = true //? safety
+
+	if p.config.Labels == nil {
+		p.config.Labels = make(map[string]string)
+	}
+	if _, ok := p.config.Labels["role"]; !ok {
+		p.config.Labels["role"] = "exporter"
+	}
+	if _, ok := p.config.Labels["target"]; !ok {
+		p.config.Labels["target"] = "object-storage"
+	}
+
 	return nil
 }
 
-func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, bool, error) {
+func (p *PostProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, artifact packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
+	imageID := ""
 	switch artifact.BuilderId() {
 	case yandex.BuilderID, artifice.BuilderId:
-		break
+		imageID = artifact.State("ImageID").(string)
+	case file.BuilderId:
+		fileName := artifact.Files()[0]
+		if content, err := ioutil.ReadFile(fileName); err == nil {
+			imageID = strings.TrimSpace(string(content))
+		} else {
+			return nil, false, false, err
+		}
 	default:
 		err := fmt.Errorf(
-			"Unknown artifact type: %s\nCan only export from Yandex Cloud builder artifact or Artifice post-processor artifact.",
+			"Unknown artifact type: %s\nCan only export from Yandex Cloud builder artifact or File builder or Artifice post-processor artifact.",
 			artifact.BuilderId())
 		return nil, false, false, err
 	}
@@ -189,40 +209,32 @@ func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact 
 
 	log.Printf("Rendered path items: %v", p.config.Paths)
 
-	imageID := artifact.State("ImageID").(string)
 	ui.Say(fmt.Sprintf("Exporting image %v to destination: %v", imageID, p.config.Paths))
 
-	// Set up exporter instance configuration.
-	exporterName := fmt.Sprintf("%s-exporter", artifact.Id())
-	exporterMetadata := map[string]string{
-		"image_id":  imageID,
-		"name":      exporterName,
-		"paths":     strings.Join(p.config.Paths, " "),
-		"user-data": CloudInitScript,
-		"zone":      p.config.Zone,
-	}
-
-	yandexConfig := ycSaneDefaults()
-	yandexConfig.Token = p.config.Token
-	yandexConfig.ServiceAccountKeyFile = p.config.ServiceAccountKeyFile
-	yandexConfig.DiskName = exporterName
-	yandexConfig.InstanceName = exporterName
-	yandexConfig.DiskSizeGb = p.config.DiskSizeGb
-	yandexConfig.Metadata = exporterMetadata
-	yandexConfig.SubnetID = p.config.SubnetID
-	yandexConfig.FolderID = p.config.FolderID
-	yandexConfig.Zone = p.config.Zone
-
-	if p.config.ServiceAccountID != "" {
-		yandexConfig.ServiceAccountID = p.config.ServiceAccountID
-	}
-
-	if p.config.PlatformID != "" {
-		yandexConfig.PlatformID = p.config.PlatformID
-	}
-
-	driver, err := yandex.NewDriverYC(ui, &yandexConfig)
+	driver, err := yandex.NewDriverYC(ui, &p.config.AccessConfig)
 	if err != nil {
+		return nil, false, false, err
+	}
+	imageDescription, err := driver.SDK().Compute().Image().Get(ctx, &compute.GetImageRequest{
+		ImageId: imageID,
+	})
+	if err != nil {
+		return nil, false, false, err
+	}
+	p.config.DiskConfig.DiskSizeGb = chooseBetterDiskSize(ctx, int(imageDescription.GetMinDiskSize()), p.config.DiskConfig.DiskSizeGb)
+
+	// Set up exporter instance configuration.
+	exporterName := strings.ToLower(fmt.Sprintf("%s-exporter", artifact.Id()))
+	yandexConfig := ycSaneDefaults(&p.config, nil)
+	if yandexConfig.InstanceConfig.InstanceName == "" {
+		yandexConfig.InstanceConfig.InstanceName = exporterName
+	}
+	if yandexConfig.DiskName == "" {
+		yandexConfig.DiskName = exporterName
+	}
+
+	ui.Say(fmt.Sprintf("Validating service_account_id: '%s'...", yandexConfig.ServiceAccountID))
+	if err := validateServiceAccount(ctx, driver.SDK(), yandexConfig.ServiceAccountID); err != nil {
 		return nil, false, false, err
 	}
 
@@ -235,21 +247,51 @@ func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact 
 
 	// Build the steps.
 	steps := []multistep.Step{
+		&StepCreateS3Keys{
+			ServiceAccountID: p.config.ServiceAccountID,
+			Paths:            p.config.Paths,
+		},
 		&yandex.StepCreateSSHKey{
 			Debug:        p.config.PackerDebug,
 			DebugKeyPath: fmt.Sprintf("yc_export_pp_%s.pem", p.config.PackerBuildName),
 		},
 		&yandex.StepCreateInstance{
 			Debug:         p.config.PackerDebug,
-			GeneratedData: &builder.GeneratedData{State: state},
+			SerialLogFile: yandexConfig.SerialLogFile,
+			GeneratedData: &packerbuilderdata.GeneratedData{State: state},
 		},
-		new(yandex.StepWaitCloudInitScript),
-		new(yandex.StepTeardownInstance),
+		new(yandex.StepInstanceInfo),
+		&communicator.StepConnect{
+			Config:    &yandexConfig.Communicator,
+			Host:      yandex.CommHost,
+			SSHConfig: yandexConfig.Communicator.SSHConfigFunc(),
+		},
+		&StepAttachDisk{
+			CommonConfig: p.config.CommonConfig,
+			ImageID:      imageID,
+			ExtraSize:    p.config.SourceDiskExtraSize,
+		},
+		new(StepUploadSecrets),
+		new(StepPrepareTools),
+		&StepDump{
+			ExtraSize: p.config.SourceDiskExtraSize != 0,
+			SizeLimit: imageDescription.GetMinDiskSize(),
+		},
+		&StepUploadToS3{
+			Paths: p.config.Paths,
+		},
+		&yandex.StepTeardownInstance{
+			SerialLogFile: yandexConfig.SerialLogFile,
+		},
+		&commonsteps.StepCleanupTempKeys{Comm: &yandexConfig.Communicator},
 	}
 
 	// Run the steps.
-	p.runner = common.NewRunner(steps, p.config.PackerConfig, ui)
+	p.runner = commonsteps.NewRunner(steps, p.config.PackerConfig, ui)
 	p.runner.Run(ctx, state)
+	if rawErr, ok := state.GetOk("error"); ok {
+		return nil, false, false, rawErr.(error)
+	}
 
 	result := &Artifact{
 		paths: p.config.Paths,
@@ -259,23 +301,26 @@ func (p *PostProcessor) PostProcess(ctx context.Context, ui packer.Ui, artifact 
 	return result, false, false, nil
 }
 
-func ycSaneDefaults() yandex.Config {
-	return yandex.Config{
-		DiskType:       "network-ssd",
-		InstanceCores:  2,
-		InstanceMemory: 2,
-		Labels: map[string]string{
-			"role":   "exporter",
-			"target": "object-storage",
-		},
-		PlatformID:          "standard-v2",
-		Preemptible:         true,
-		SourceImageFamily:   "ubuntu-1604-lts",
-		SourceImageFolderID: yandex.StandardImagesFolderID,
-		UseIPv4Nat:          true,
-		Zone:                "ru-central1-a",
-		StateTimeout:        3 * time.Minute,
+func ycSaneDefaults(c *Config, md map[string]string) yandex.Config {
+	yandexConfig := yandex.Config{
+		CommonConfig: c.CommonConfig,
+		AccessConfig: c.AccessConfig,
+		Communicator: c.Config,
 	}
+	if yandexConfig.Metadata == nil {
+		yandexConfig.Metadata = md
+	} else {
+		for k, v := range md {
+			yandexConfig.Metadata[k] = v
+		}
+	}
+
+	yandexConfig.SourceImageFamily = c.SourceImageFamily
+	yandexConfig.SourceImageFolderID = c.SourceImageFolderID
+	yandexConfig.SourceImageID = c.SourceImageID
+	yandexConfig.ServiceAccountID = c.ServiceAccountID
+
+	return yandexConfig
 }
 
 func formUrls(paths []string) []string {
@@ -285,4 +330,16 @@ func formUrls(paths []string) []string {
 		result = append(result, url)
 	}
 	return result
+}
+
+func validateServiceAccount(ctx context.Context, ycsdk *ycsdk.SDK, serviceAccountID string) error {
+	_, err := ycsdk.IAM().ServiceAccount().Get(ctx, &iam.GetServiceAccountRequest{
+		ServiceAccountId: serviceAccountID,
+	})
+	return err
+}
+
+func chooseBetterDiskSize(ctx context.Context, minSizeBytes, oldSizeGB int) int {
+	max := math.Max(float64(minSizeBytes), float64((datasize.GB * datasize.ByteSize(oldSizeGB)).Bytes()))
+	return int(math.Ceil(datasize.ByteSize(max).GBytes()))
 }

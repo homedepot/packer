@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 type StepMountSecondaryDvdImages struct {
@@ -22,7 +22,7 @@ type DvdControllerProperties struct {
 
 func (s *StepMountSecondaryDvdImages) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	ui.Say("Mounting secondary DVD images...")
 
 	vmName := state.Get("vmName").(string)
@@ -34,7 +34,17 @@ func (s *StepMountSecondaryDvdImages) Run(ctx context.Context, state multistep.S
 	// For IDE, there are only 2 controllers (0,1) with 2 locations each (0,1)
 	var dvdProperties []DvdControllerProperties
 
-	for _, isoPath := range s.IsoPaths {
+	isoPaths := s.IsoPaths
+
+	// Add our custom CD, if it exists
+	cd_path, ok := state.Get("cd_path").(string)
+	if ok {
+		if cd_path != "" {
+			isoPaths = append(isoPaths, cd_path)
+		}
+	}
+
+	for _, isoPath := range isoPaths {
 		var properties DvdControllerProperties
 
 		controllerNumber, controllerLocation, err := driver.CreateDvdDrive(vmName, isoPath, s.Generation)
@@ -74,7 +84,7 @@ func (s *StepMountSecondaryDvdImages) Cleanup(state multistep.StateBag) {
 
 	dvdControllers := dvdControllersState.([]DvdControllerProperties)
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmName := state.Get("vmName").(string)
 	errorMsg := "Error unmounting secondary dvd drive: %s"
 

@@ -10,14 +10,15 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/hashicorp/packer/common/random"
-	"github.com/hashicorp/packer/common/retry"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/random"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer/builder/amazon/common/awserrors"
 )
 
 type EC2BlockDeviceMappingsBuilder interface {
@@ -33,8 +34,12 @@ type StepRunSpotInstance struct {
 	Comm                              *communicator.Config
 	EbsOptimized                      bool
 	ExpectedRootDevice                string
+	HttpEndpoint                      string
+	HttpTokens                        string
+	HttpPutResponseHopLimit           int64
 	InstanceInitiatedShutdownBehavior string
 	InstanceType                      string
+	Region                            string
 	SourceAMI                         string
 	SpotPrice                         string
 	SpotTags                          map[string]string
@@ -49,6 +54,24 @@ type StepRunSpotInstance struct {
 	instanceId string
 }
 
+// The EbsBlockDevice and LaunchTemplateEbsBlockDeviceRequest structs are
+// nearly identical except for the struct's name and one extra field in
+// EbsBlockDeviceResuest, which unfortunately means you can't just cast one
+// into the other. THANKS AMAZON.
+func castBlockDeviceToRequest(bd *ec2.EbsBlockDevice) *ec2.LaunchTemplateEbsBlockDeviceRequest {
+	out := &ec2.LaunchTemplateEbsBlockDeviceRequest{
+		DeleteOnTermination: bd.DeleteOnTermination,
+		Encrypted:           bd.Encrypted,
+		Iops:                bd.Iops,
+		KmsKeyId:            bd.KmsKeyId,
+		SnapshotId:          bd.SnapshotId,
+		Throughput:          bd.Throughput,
+		VolumeSize:          bd.VolumeSize,
+		VolumeType:          bd.VolumeType,
+	}
+	return out
+}
+
 func (s *StepRunSpotInstance) CreateTemplateData(userData *string, az string,
 	state multistep.StateBag, marketOptions *ec2.LaunchTemplateInstanceMarketOptionsRequest) *ec2.RequestLaunchTemplateData {
 	blockDeviceMappings := s.LaunchMappings.BuildEC2BlockDeviceMappings()
@@ -56,15 +79,12 @@ func (s *StepRunSpotInstance) CreateTemplateData(userData *string, az string,
 	// LaunchTemplateBlockDeviceMappingRequest. These structs are identical,
 	// except for the EBS field -- on one, that field contains a
 	// LaunchTemplateEbsBlockDeviceRequest, and on the other, it contains an
-	// EbsBlockDevice. The EbsBlockDevice and
-	// LaunchTemplateEbsBlockDeviceRequest structs are themselves
-	// identical except for the struct's name, so you can cast one directly
-	// into the other.
+	// EbsBlockDevice.
 	var launchMappingRequests []*ec2.LaunchTemplateBlockDeviceMappingRequest
 	for _, mapping := range blockDeviceMappings {
 		launchRequest := &ec2.LaunchTemplateBlockDeviceMappingRequest{
 			DeviceName:  mapping.DeviceName,
-			Ebs:         (*ec2.LaunchTemplateEbsBlockDeviceRequest)(mapping.Ebs),
+			Ebs:         castBlockDeviceToRequest(mapping.Ebs),
 			VirtualName: mapping.VirtualName,
 		}
 		launchMappingRequests = append(launchMappingRequests, launchRequest)
@@ -125,6 +145,10 @@ func (s *StepRunSpotInstance) CreateTemplateData(userData *string, az string,
 
 	}
 
+	if s.HttpEndpoint == "enabled" {
+		templateData.MetadataOptions = &ec2.LaunchTemplateInstanceMetadataOptionsRequest{HttpEndpoint: &s.HttpEndpoint, HttpTokens: &s.HttpTokens, HttpPutResponseHopLimit: &s.HttpPutResponseHopLimit}
+	}
+
 	// If instance type is not set, we'll just pick the lowest priced instance
 	// available.
 	if s.InstanceType != "" {
@@ -158,8 +182,8 @@ func (s *StepRunSpotInstance) LoadUserData() (string, error) {
 }
 
 func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
-	ec2conn := state.Get("ec2").(*ec2.EC2)
-	ui := state.Get("ui").(packer.Ui)
+	ec2conn := state.Get("ec2").(ec2iface.EC2API)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	ui.Say("Launching a spot AWS instance...")
 
@@ -197,7 +221,7 @@ func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag)
 	}
 
 	// Convert tags from the tag map provided by the user into *ec2.Tag s
-	ec2Tags, err := TagMap(s.Tags).EC2Tags(s.Ctx, *ec2conn.Config.Region, state)
+	ec2Tags, err := TagMap(s.Tags).EC2Tags(s.Ctx, s.Region, state)
 	if err != nil {
 		err := fmt.Errorf("Error generating tags for source instance: %s", err)
 		state.Put("error", err)
@@ -207,6 +231,15 @@ func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag)
 	// This prints the tags to the ui; it doesn't actually add them to the
 	// instance yet
 	ec2Tags.Report(ui)
+
+	volumeTags, err := TagMap(s.VolumeTags).EC2Tags(s.Ctx, s.Region, state)
+	if err != nil {
+		err := fmt.Errorf("Error generating volume tags: %s", err)
+		state.Put("error", err)
+		ui.Error(err.Error())
+		return multistep.ActionHalt
+	}
+	volumeTags.Report(ui)
 
 	spotOptions := ec2.LaunchTemplateSpotMarketOptionsRequest{}
 	// The default is to set the maximum price to the OnDemand price.
@@ -220,6 +253,14 @@ func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag)
 		SpotOptions: &spotOptions,
 	}
 	marketOptions.SetMarketType(ec2.MarketTypeSpot)
+
+	spotTags, err := TagMap(s.SpotTags).EC2Tags(s.Ctx, s.Region, state)
+	if err != nil {
+		err := fmt.Errorf("Error generating tags for spot request: %s", err)
+		state.Put("error", err)
+		ui.Error(err.Error())
+		return multistep.ActionHalt
+	}
 
 	// Create a launch template for the instance
 	ui.Message("Loading User Data File...")
@@ -243,15 +284,46 @@ func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag)
 		LaunchTemplateName: aws.String(launchTemplateName),
 		VersionDescription: aws.String("template generated by packer for launching spot instances"),
 	}
+	if len(spotTags) > 0 {
+		launchTemplate.TagSpecifications = []*ec2.TagSpecification{
+			{
+				ResourceType: aws.String("launch-template"),
+				Tags:         spotTags,
+			},
+		}
+	}
+
+	if len(ec2Tags) > 0 {
+		launchTemplate.LaunchTemplateData.TagSpecifications = append(
+			launchTemplate.LaunchTemplateData.TagSpecifications,
+			&ec2.LaunchTemplateTagSpecificationRequest{
+				ResourceType: aws.String("instance"),
+				Tags:         ec2Tags,
+			},
+		)
+	}
+
+	if len(volumeTags) > 0 {
+		launchTemplate.LaunchTemplateData.TagSpecifications = append(
+			launchTemplate.LaunchTemplateData.TagSpecifications,
+			&ec2.LaunchTemplateTagSpecificationRequest{
+				ResourceType: aws.String("volume"),
+				Tags:         volumeTags,
+			},
+		)
+	}
 
 	// Tell EC2 to create the template
-	_, err = ec2conn.CreateLaunchTemplate(launchTemplate)
+	createLaunchTemplateOutput, err := ec2conn.CreateLaunchTemplate(launchTemplate)
 	if err != nil {
 		err := fmt.Errorf("Error creating launch template for spot instance: %s", err)
 		state.Put("error", err)
 		ui.Error(err.Error())
 		return multistep.ActionHalt
 	}
+
+	launchTemplateId := createLaunchTemplateOutput.LaunchTemplate.LaunchTemplateId
+	ui.Message(fmt.Sprintf("Created Spot Fleet launch template: %s", *launchTemplateId))
 
 	// Add overrides for each user-provided instance type
 	var overrides []*ec2.FleetLaunchTemplateOverridesRequest
@@ -281,7 +353,6 @@ func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag)
 	}
 
 	var createOutput *ec2.CreateFleetOutput
-
 	err = retry.Config{
 		Tries: 11,
 		ShouldRetry: func(err error) bool {
@@ -291,14 +362,22 @@ func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag)
 				// we can wait on those operations, this can be removed.
 				return true
 			}
-			return request.IsErrorRetryable(err)
+			return false
 		},
 		RetryDelay: (&retry.Backoff{InitialBackoff: 500 * time.Millisecond, MaxBackoff: 30 * time.Second, Multiplier: 2}).Linear,
 	}.Run(ctx, func(ctx context.Context) error {
 		createOutput, err = ec2conn.CreateFleet(createFleetInput)
-
 		if err == nil && createOutput.Errors != nil {
 			err = fmt.Errorf("errors: %v", createOutput.Errors)
+		}
+		// We can end up with errors because one of the allowed availability
+		// zones doesn't have one of the allowed instance types; as long as
+		// an instance is launched, these errors aren't important.
+		if len(createOutput.Instances) > 0 {
+			if err != nil {
+				log.Printf("create request failed for some instances %v", err.Error())
+			}
+			return nil
 		}
 		if err != nil {
 			log.Printf("create request failed %v", err)
@@ -306,25 +385,16 @@ func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag)
 		return err
 	})
 
-	// Create the request for the spot instance.
 	if err != nil {
 		if createOutput.FleetId != nil {
 			err = fmt.Errorf("Error waiting for fleet request (%s): %s", *createOutput.FleetId, err)
-		} else {
-			err = fmt.Errorf("Error waiting for fleet request: %s", err)
 		}
-		// We can end up with errors because one of the allowed availability
-		// zones doesn't have one of the allowed instance types; as long as
-		// an instance is launched, these errors aren't important.
 		if len(createOutput.Errors) > 0 {
 			errString := fmt.Sprintf("Error waiting for fleet request (%s) to become ready:", *createOutput.FleetId)
 			for _, outErr := range createOutput.Errors {
 				errString = errString + aws.StringValue(outErr.ErrorMessage)
 			}
 			err = fmt.Errorf(errString)
-			state.Put("error", err)
-			ui.Error(err.Error())
-			return multistep.ActionHalt
 		}
 		state.Put("error", err)
 		ui.Error(err.Error())
@@ -363,14 +433,6 @@ func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag)
 	instance := describeOutput.Reservations[0].Instances[0]
 
 	// Tag the spot instance request (not the eventual spot instance)
-	spotTags, err := TagMap(s.SpotTags).EC2Tags(s.Ctx, *ec2conn.Config.Region, state)
-	if err != nil {
-		err := fmt.Errorf("Error generating tags for spot request: %s", err)
-		state.Put("error", err)
-		ui.Error(err.Error())
-		return multistep.ActionHalt
-	}
-
 	if len(spotTags) > 0 && len(s.SpotTags) > 0 {
 		spotTags.Report(ui)
 		// Use the instance ID to find out the SIR, so that we can tag the spot
@@ -398,8 +460,8 @@ func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag)
 	}
 
 	// Retry creating tags for about 2.5 minutes
-	err = retry.Config{Tries: 11, ShouldRetry: func(error) bool {
-		if IsAWSErr(err, "InvalidInstanceID.NotFound", "") {
+	err = retry.Config{Tries: 11, ShouldRetry: func(err error) bool {
+		if awserrors.Matches(err, "InvalidInstanceID.NotFound", "") {
 			return true
 		}
 		return false
@@ -429,16 +491,6 @@ func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag)
 
 	if len(volumeIds) > 0 && len(s.VolumeTags) > 0 {
 		ui.Say("Adding tags to source EBS Volumes")
-
-		volumeTags, err := TagMap(s.VolumeTags).EC2Tags(s.Ctx, *ec2conn.Config.Region, state)
-		if err != nil {
-			err := fmt.Errorf("Error tagging source EBS Volumes on %s: %s", *instance.InstanceId, err)
-			state.Put("error", err)
-			ui.Error(err.Error())
-			return multistep.ActionHalt
-		}
-		volumeTags.Report(ui)
-
 		_, err = ec2conn.CreateTags(&ec2.CreateTagsInput{
 			Resources: volumeIds,
 			Tags:      volumeTags,
@@ -477,7 +529,7 @@ func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag)
 
 func (s *StepRunSpotInstance) Cleanup(state multistep.StateBag) {
 	ec2conn := state.Get("ec2").(*ec2.EC2)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	launchTemplateName := state.Get("launchTemplateName").(string)
 
 	// Terminate the source instance if it exists

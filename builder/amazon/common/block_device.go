@@ -9,8 +9,17 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+)
+
+const (
+	minIops       = 100
+	maxIops       = 64000
+	minIopsGp3    = 3000
+	maxIopsGp3    = 16000
+	minThroughput = 125
+	maxThroughput = 1000
 )
 
 // These will be attached when launching your instance. Your
@@ -21,18 +30,6 @@ import (
 // The following mapping will tell Packer to encrypt the root volume of the
 // build instance at launch using a specific non-default kms key:
 //
-// JSON example:
-//
-// ```json
-// launch_block_device_mappings: [
-//   {
-//      "device_name": "/dev/sda1",
-//      "encrypted": true,
-//      "kms_key_id": "1a2b3c4d-5e6f-1a2b-3c4d-5e6f1a2b3c4d"
-//   }
-// ]
-// ```
-//
 // HCL2 example:
 //
 // ```hcl
@@ -41,6 +38,17 @@ import (
 //     encrypted = true
 //     kms_key_id = "1a2b3c4d-5e6f-1a2b-3c4d-5e6f1a2b3c4d"
 // }
+// ```
+//
+// JSON example:
+// ```json
+// "launch_block_device_mappings": [
+//   {
+//      "device_name": "/dev/sda1",
+//      "encrypted": true,
+//      "kms_key_id": "1a2b3c4d-5e6f-1a2b-3c4d-5e6f1a2b3c4d"
+//   }
+// ]
 // ```
 //
 // Please note that the kms_key_id option in this example exists for
@@ -67,18 +75,23 @@ type BlockDevice struct {
 	// See the documentation on
 	// [IOPs](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_EbsBlockDevice.html)
 	// for more information
-	IOPS int64 `mapstructure:"iops" required:"false"`
+	IOPS *int64 `mapstructure:"iops" required:"false"`
 	// Suppresses the specified device included in the block device mapping of
 	// the AMI.
 	NoDevice bool `mapstructure:"no_device" required:"false"`
 	// The ID of the snapshot.
 	SnapshotId string `mapstructure:"snapshot_id" required:"false"`
+	// The throughput for gp3 volumes, only valid for gp3 types
+	// See the documentation on
+	// [Throughput](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_EbsBlockDevice.html)
+	// for more information
+	Throughput *int64 `mapstructure:"throughput" required:"false"`
 	// The virtual device name. See the documentation on Block Device Mapping
 	// for more information.
 	VirtualName string `mapstructure:"virtual_name" required:"false"`
-	// The volume type. gp2 for General Purpose (SSD) volumes, io1 for
-	// Provisioned IOPS (SSD) volumes, st1 for Throughput Optimized HDD, sc1
-	// for Cold HDD, and standard for Magnetic volumes.
+	// The volume type. gp2 & gp3 for General Purpose (SSD) volumes, io1 & io2
+	// for Provisioned IOPS (SSD) volumes, st1 for Throughput Optimized HDD,
+	// sc1 for Cold HDD, and standard for Magnetic volumes.
 	VolumeType string `mapstructure:"volume_type" required:"false"`
 	// The size of the volume, in GiB. Required if not specifying a
 	// snapshot_id.
@@ -134,9 +147,14 @@ func (blockDevice BlockDevice) BuildEC2BlockDeviceMapping() *ec2.BlockDeviceMapp
 		ebsBlockDevice.VolumeSize = aws.Int64(blockDevice.VolumeSize)
 	}
 
-	// IOPS is only valid for io1 type
-	if blockDevice.VolumeType == "io1" {
-		ebsBlockDevice.Iops = aws.Int64(blockDevice.IOPS)
+	switch blockDevice.VolumeType {
+	case "io1", "io2", "gp3":
+		ebsBlockDevice.Iops = blockDevice.IOPS
+	}
+
+	// Throughput is only valid for gp3 types
+	if blockDevice.VolumeType == "gp3" {
+		ebsBlockDevice.Throughput = blockDevice.Throughput
 	}
 
 	// You cannot specify Encrypted if you specify a Snapshot ID
@@ -154,6 +172,11 @@ func (blockDevice BlockDevice) BuildEC2BlockDeviceMapping() *ec2.BlockDeviceMapp
 	return mapping
 }
 
+var iopsRatios = map[string]int64{
+	"io1": 50,
+	"io2": 500,
+}
+
 func (b *BlockDevice) Prepare(ctx *interpolate.Context) error {
 	if b.DeviceName == "" {
 		return fmt.Errorf("The `device_name` must be specified " +
@@ -164,6 +187,33 @@ func (b *BlockDevice) Prepare(ctx *interpolate.Context) error {
 	if b.KmsKeyId != "" && b.Encrypted.False() {
 		return fmt.Errorf("The device %v, must also have `encrypted: "+
 			"true` when setting a kms_key_id.", b.DeviceName)
+	}
+
+	if ratio, ok := iopsRatios[b.VolumeType]; b.VolumeSize != 0 && ok {
+		if b.IOPS != nil && (*b.IOPS/b.VolumeSize > ratio) {
+			return fmt.Errorf("%s: the maximum ratio of provisioned IOPS to requested volume size "+
+				"(in GiB) is %v:1 for %s volumes", b.DeviceName, ratio, b.VolumeType)
+		}
+
+		if b.IOPS != nil && (*b.IOPS < minIops || *b.IOPS > maxIops) {
+			return fmt.Errorf("IOPS must be between %d and %d for device %s",
+				minIops, maxIops, b.DeviceName)
+		}
+	}
+
+	if b.VolumeType == "gp3" {
+		if b.Throughput != nil && (*b.Throughput < minThroughput || *b.Throughput > maxThroughput) {
+			return fmt.Errorf("Throughput must be between %d and %d for device %s",
+				minThroughput, maxThroughput, b.DeviceName)
+		}
+
+		if b.IOPS != nil && (*b.IOPS < minIopsGp3 || *b.IOPS > maxIopsGp3) {
+			return fmt.Errorf("IOPS must be between %d and %d for device %s",
+				minIopsGp3, maxIopsGp3, b.DeviceName)
+		}
+	} else if b.Throughput != nil {
+		return fmt.Errorf("Throughput is not available for device %s",
+			b.DeviceName)
 	}
 
 	_, err := interpolate.RenderInterface(&b, ctx)

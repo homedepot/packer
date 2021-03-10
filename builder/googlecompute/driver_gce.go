@@ -10,21 +10,21 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/http"
 	"strings"
 	"time"
 
 	compute "google.golang.org/api/compute/v1"
+	"google.golang.org/api/option"
 	oslogin "google.golang.org/api/oslogin/v1"
 
-	"github.com/hashicorp/packer/common/retry"
-	"github.com/hashicorp/packer/helper/useragent"
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
+	"github.com/hashicorp/packer-plugin-sdk/useragent"
+	"github.com/hashicorp/packer/builder/googlecompute/version"
 	vaultapi "github.com/hashicorp/vault/api"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
-	"golang.org/x/oauth2/jwt"
 )
 
 // driverGCE is a Driver implementation that actually talks to GCE.
@@ -33,7 +33,15 @@ type driverGCE struct {
 	projectId      string
 	service        *compute.Service
 	osLoginService *oslogin.Service
-	ui             packer.Ui
+	ui             packersdk.Ui
+}
+
+type GCEDriverConfig struct {
+	Ui                            packersdk.Ui
+	ProjectId                     string
+	Account                       *ServiceAccount
+	ImpersonateServiceAccountName string
+	VaultOauthEngineName          string
 }
 
 var DriverScopes = []string{"https://www.googleapis.com/auth/compute", "https://www.googleapis.com/auth/devstorage.full_control"}
@@ -71,31 +79,34 @@ func (ots OauthTokenSource) Token() (*oauth2.Token, error) {
 
 }
 
-func NewClientGCE(conf *jwt.Config, vaultOauth string) (*http.Client, error) {
+func NewClientOptionGoogle(account *ServiceAccount, vaultOauth string, impersonatesa string) (option.ClientOption, error) {
 	var err error
 
-	var client *http.Client
+	var opts option.ClientOption
 
 	if vaultOauth != "" {
 		// Auth with Vault Oauth
 		log.Printf("Using Vault to generate Oauth token.")
 		ts := OauthTokenSource{vaultOauth}
-		return oauth2.NewClient(context.TODO(), ts), nil
+		opts = option.WithTokenSource(ts)
 
-	} else if conf != nil && len(conf.PrivateKey) > 0 {
+	} else if impersonatesa != "" {
+		opts = option.ImpersonateCredentials(impersonatesa)
+	} else if account != nil && account.jwt != nil && len(account.jwt.PrivateKey) > 0 {
 		// Auth with AccountFile if provided
 		log.Printf("[INFO] Requesting Google token via account_file...")
-		log.Printf("[INFO]   -- Email: %s", conf.Email)
+		log.Printf("[INFO]   -- Email: %s", account.jwt.Email)
 		log.Printf("[INFO]   -- Scopes: %s", DriverScopes)
-		log.Printf("[INFO]   -- Private Key Length: %d", len(conf.PrivateKey))
+		log.Printf("[INFO]   -- Private Key Length: %d", len(account.jwt.PrivateKey))
 
-		// Initiate an http.Client. The following GET request will be
-		// authorized and authenticated on the behalf of
-		// your service account.
-		client = conf.Client(context.TODO())
+		opts = option.WithCredentialsJSON(account.jsonKey)
 	} else {
 		log.Printf("[INFO] Requesting Google token via GCE API Default Client Token Source...")
-		client, err = google.DefaultClient(context.TODO(), DriverScopes...)
+		ts, err := google.DefaultTokenSource(context.TODO(), "https://www.googleapis.com/auth/cloud-platform")
+		if err != nil {
+			return nil, err
+		}
+		opts = option.WithTokenSource(ts)
 		// The DefaultClient uses the DefaultTokenSource of the google lib.
 		// The DefaultTokenSource uses the "Application Default Credentials"
 		// It looks for credentials in the following places, preferring the first location found:
@@ -108,40 +119,45 @@ func NewClientGCE(conf *jwt.Config, vaultOauth string) (*http.Client, error) {
 		// 4. On Google Compute Engine and Google App Engine Managed VMs, it fetches
 		//    credentials from the metadata server.
 		//    (In this final case any provided scopes are ignored.)
+		//
+		//    Note: (4) is not usable with OSLogin on Google Compute Engine (GCE).
+		//    The GCE service account is derived separately and used instead.
 	}
 
 	if err != nil {
 		return nil, err
 	}
 
-	return client, nil
+	return opts, nil
 }
 
-func NewDriverGCE(ui packer.Ui, p string, conf *jwt.Config, vaultOauth string) (Driver, error) {
-	client, err := NewClientGCE(conf, vaultOauth)
+func NewDriverGCE(config GCEDriverConfig) (Driver, error) {
+
+	opts, err := NewClientOptionGoogle(config.Account, config.VaultOauthEngineName, config.ImpersonateServiceAccountName)
 	if err != nil {
 		return nil, err
 	}
 
 	log.Printf("[INFO] Instantiating GCE client...")
-	service, err := compute.New(client)
+	service, err := compute.NewService(context.TODO(), opts)
 	if err != nil {
 		return nil, err
 	}
 
-	osLoginService, err := oslogin.New(client)
+	log.Printf("[INFO] Instantiating OS Login client...")
+	osLoginService, err := oslogin.NewService(context.TODO(), opts)
 	if err != nil {
 		return nil, err
 	}
 
 	// Set UserAgent
-	service.UserAgent = useragent.String()
+	service.UserAgent = useragent.String(version.GCEPluginVersion.FormattedVersion())
 
 	return &driverGCE{
-		projectId:      p,
+		projectId:      config.ProjectId,
 		service:        service,
 		osLoginService: osLoginService,
-		ui:             ui,
+		ui:             config.Ui,
 	}, nil
 }
 
@@ -237,7 +253,6 @@ func (d *driverGCE) GetImage(name string, fromFamily bool) (*Image, error) {
 		"ubuntu-os-cloud",
 		"windows-cloud",
 		"windows-sql-cloud",
-		"gce-uefi-images",
 		"gce-nvme",
 		// misc
 		"google-containers",
@@ -250,7 +265,7 @@ func (d *driverGCE) GetImageFromProjects(projects []string, name string, fromFam
 	for _, project := range projects {
 		image, err := d.GetImageFromProject(project, name, fromFamily)
 		if err != nil {
-			errs = packer.MultiErrorAppend(errs, err)
+			errs = packersdk.MultiErrorAppend(errs, err)
 		}
 		if image != nil {
 			return image, nil
@@ -552,7 +567,7 @@ func (d *driverGCE) createWindowsPassword(errCh chan<- error, name, zone string,
 		return
 	}
 
-	timeout := time.Now().Add(time.Minute * 3)
+	timeout := time.Now().Add(c.WindowsPasswordTimeout)
 	hash := sha1.New()
 	random := rand.Reader
 
@@ -615,6 +630,7 @@ func (d *driverGCE) getPasswordResponses(zone, instance string) ([]windowsPasswo
 
 func (d *driverGCE) ImportOSLoginSSHKey(user, sshPublicKey string) (*oslogin.LoginProfile, error) {
 	parent := fmt.Sprintf("users/%s", user)
+
 	resp, err := d.osLoginService.Users.ImportSshPublicKey(parent, &oslogin.SshPublicKey{
 		Key: sshPublicKey,
 	}).Do()
@@ -663,7 +679,7 @@ func (d *driverGCE) refreshGlobalOp(op *compute.Operation) stateRefreshFunc {
 		if newOp.Status == "DONE" {
 			if newOp.Error != nil {
 				for _, e := range newOp.Error.Errors {
-					err = packer.MultiErrorAppend(err, fmt.Errorf(e.Message))
+					err = packersdk.MultiErrorAppend(err, fmt.Errorf(e.Message))
 				}
 			}
 		}
@@ -684,7 +700,7 @@ func (d *driverGCE) refreshZoneOp(zone string, op *compute.Operation) stateRefre
 		if newOp.Status == "DONE" {
 			if newOp.Error != nil {
 				for _, e := range newOp.Error.Errors {
-					err = packer.MultiErrorAppend(err, fmt.Errorf(e.Message))
+					err = packersdk.MultiErrorAppend(err, fmt.Errorf(e.Message))
 				}
 			}
 		}
@@ -714,4 +730,52 @@ func waitForState(errCh chan<- error, target string, refresh stateRefreshFunc) e
 	})
 	errCh <- err
 	return err
+}
+
+func (d *driverGCE) AddToInstanceMetadata(zone string, name string, metadata map[string]string) error {
+
+	instance, err := d.service.Instances.Get(d.projectId, zone, name).Do()
+	if err != nil {
+		return err
+	}
+
+	// Build up the metadata
+	metadataForInstance := make([]*compute.MetadataItems, len(metadata))
+	for k, v := range metadata {
+		vCopy := v
+		metadataForInstance = append(metadataForInstance, &compute.MetadataItems{
+			Key:   k,
+			Value: &vCopy,
+		})
+	}
+
+	instance.Metadata.Items = append(instance.Metadata.Items, metadataForInstance...)
+
+	op, err := d.service.Instances.SetMetadata(d.projectId, zone, name, &compute.Metadata{
+		Fingerprint: instance.Metadata.Fingerprint,
+		Items:       instance.Metadata.Items,
+	}).Do()
+
+	if err != nil {
+		return err
+	}
+
+	newErrCh := make(chan error, 1)
+
+	go func() {
+		err = waitForState(newErrCh, "DONE", d.refreshZoneOp(zone, op))
+
+		select {
+		case err = <-newErrCh:
+		case <-time.After(time.Second * 30):
+			err = errors.New("time out while waiting for instance to create")
+		}
+	}()
+
+	if err != nil {
+		newErrCh <- err
+		return err
+	}
+
+	return nil
 }

@@ -6,9 +6,9 @@ import (
 	"os"
 	"testing"
 
+	builderT "github.com/hashicorp/packer-plugin-sdk/acctest"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	commonT "github.com/hashicorp/packer/builder/vsphere/common/testing"
-	builderT "github.com/hashicorp/packer/helper/builder/testing"
-	"github.com/hashicorp/packer/packer"
 	"github.com/vmware/govmomi/vim25/types"
 )
 
@@ -42,8 +42,10 @@ func defaultConfig() map[string]interface{} {
 		"ssh_username": "root",
 		"ssh_password": "jetbrains",
 
-		"vm_name":   commonT.NewVMName(),
-		"disk_size": 2048,
+		"vm_name": commonT.NewVMName(),
+		"storage": map[string]interface{}{
+			"disk_size": 2048,
+		},
 
 		"communicator": "none", // do not start the VM without any bootable devices
 	}
@@ -52,7 +54,7 @@ func defaultConfig() map[string]interface{} {
 }
 
 func checkDefault(t *testing.T, name string, host string, datastore string) builderT.TestCheckFunc {
-	return func(artifacts []packer.Artifact) error {
+	return func(artifacts []packersdk.Artifact) error {
 		d := commonT.TestConn(t)
 		vm := commonT.GetVM(t, d, artifacts)
 
@@ -127,7 +129,7 @@ func notesConfig() string {
 }
 
 func checkNotes(t *testing.T) builderT.TestCheckFunc {
-	return func(artifacts []packer.Artifact) error {
+	return func(artifacts []packersdk.Artifact) error {
 		d := commonT.TestConn(t)
 		vm := commonT.GetVM(t, d, artifacts)
 
@@ -169,7 +171,7 @@ func hardwareConfig() string {
 }
 
 func checkHardware(t *testing.T) builderT.TestCheckFunc {
-	return func(artifacts []packer.Artifact) error {
+	return func(artifacts []packersdk.Artifact) error {
 		d := commonT.TestConn(t)
 
 		vm := commonT.GetVM(t, d, artifacts)
@@ -259,7 +261,7 @@ func limitConfig() string {
 }
 
 func checkLimit(t *testing.T) builderT.TestCheckFunc {
-	return func(artifacts []packer.Artifact) error {
+	return func(artifacts []packersdk.Artifact) error {
 		d := commonT.TestConn(t)
 
 		vm := commonT.GetVM(t, d, artifacts)
@@ -293,7 +295,7 @@ func sataConfig() string {
 }
 
 func checkSata(t *testing.T) builderT.TestCheckFunc {
-	return func(artifacts []packer.Artifact) error {
+	return func(artifacts []packersdk.Artifact) error {
 		d := commonT.TestConn(t)
 
 		vm := commonT.GetVM(t, d, artifacts)
@@ -338,12 +340,14 @@ func TestISOBuilderAcc_networkCard(t *testing.T) {
 
 func networkCardConfig() string {
 	config := defaultConfig()
-	config["network_card"] = "vmxnet3"
+	config["network_adapters"] = map[string]interface{}{
+		"network_card": "vmxnet3",
+	}
 	return commonT.RenderConfig(config)
 }
 
 func checkNetworkCard(t *testing.T) builderT.TestCheckFunc {
-	return func(artifacts []packer.Artifact) error {
+	return func(artifacts []packersdk.Artifact) error {
 		d := commonT.TestConn(t)
 
 		vm := commonT.GetVM(t, d, artifacts)
@@ -421,12 +425,18 @@ func fullConfig() map[string]interface{} {
 		"vm_name": commonT.NewVMName(),
 		"host":    "esxi-1.vsphere65.test",
 
-		"RAM":                   512,
-		"disk_controller_type":  "pvscsi",
-		"disk_size":             1024,
-		"disk_thin_provisioned": true,
-		"network_card":          "vmxnet3",
-		"guest_os_type":         "other3xLinux64Guest",
+		"RAM": 512,
+		"disk_controller_type": []string{
+			"pvscsi",
+		},
+		"storage": map[string]interface{}{
+			"disk_size":             1024,
+			"disk_thin_provisioned": true,
+		},
+		"network_adapters": map[string]interface{}{
+			"network_card": "vmxnet3",
+		},
+		"guest_os_type": "other3xLinux64Guest",
 
 		"iso_paths": []string{
 			"[datastore1] ISO/alpine-standard-3.8.2-x86_64.iso",
@@ -463,7 +473,7 @@ func fullConfig() map[string]interface{} {
 }
 
 func checkFull(t *testing.T) builderT.TestCheckFunc {
-	return func(artifacts []packer.Artifact) error {
+	return func(artifacts []packersdk.Artifact) error {
 		d := commonT.TestConn(t)
 		vm := commonT.GetVM(t, d, artifacts)
 
@@ -505,7 +515,7 @@ func TestISOBuilderAcc_bootOrder(t *testing.T) {
 }
 
 func checkBootOrder(t *testing.T) builderT.TestCheckFunc {
-	return func(artifacts []packer.Artifact) error {
+	return func(artifacts []packersdk.Artifact) error {
 		d := commonT.TestConn(t)
 		vm := commonT.GetVM(t, d, artifacts)
 
@@ -550,7 +560,9 @@ func clusterDRSConfig() string {
 	config["cluster"] = "cluster2"
 	config["host"] = ""
 	config["datastore"] = "datastore3" // bug #183
-	config["network"] = "VM Network"   // bug #183
+	config["network_adapters"] = map[string]interface{}{
+		"network": "VM Network",
+	}
 
 	return commonT.RenderConfig(config)
 }

@@ -6,9 +6,9 @@ import (
 	"fmt"
 
 	"github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2018-02-01/resources"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/azure/common/constants"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 type StepCreateResourceGroup struct {
@@ -19,7 +19,7 @@ type StepCreateResourceGroup struct {
 	exists func(ctx context.Context, resourceGroupName string) (bool, error)
 }
 
-func NewStepCreateResourceGroup(client *AzureClient, ui packer.Ui) *StepCreateResourceGroup {
+func NewStepCreateResourceGroup(client *AzureClient, ui packersdk.Ui) *StepCreateResourceGroup {
 	var step = &StepCreateResourceGroup{
 		client: client,
 		say:    func(message string) { ui.Say(message) },
@@ -61,7 +61,13 @@ func (s *StepCreateResourceGroup) Run(ctx context.Context, state multistep.State
 
 	var resourceGroupName = state.Get(constants.ArmResourceGroupName).(string)
 	var location = state.Get(constants.ArmLocation).(string)
-	var tags = state.Get(constants.ArmTags).(map[string]*string)
+	tags, ok := state.Get(constants.ArmTags).(map[string]*string)
+	if !ok {
+		err := fmt.Errorf("failed to extract tags from state bag")
+		state.Put(constants.Error, err)
+		s.error(err)
+		return multistep.ActionHalt
+	}
 
 	exists, err := s.exists(ctx, resourceGroupName)
 	if err != nil {
@@ -107,7 +113,7 @@ func (s *StepCreateResourceGroup) Cleanup(state multistep.StateBag) {
 		return
 	}
 
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	if state.Get(constants.ArmIsExistingResourceGroup).(bool) {
 		ui.Say("\nThe resource group was not created by Packer, not deleting ...")
 		return
